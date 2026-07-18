@@ -29,7 +29,11 @@ UPOWER_NAME = "org.freedesktop.UPower"
 UPOWER_PATH = "/org/freedesktop/UPower"
 UPOWER_INTERFACE = "org.freedesktop.UPower"
 KBD_BACKLIGHT_INTERFACE = "org.freedesktop.UPower.KbdBacklight"
+GSD_POWER_NAME = "org.gnome.SettingsDaemon.Power"
+GSD_POWER_PATH = "/org/gnome/SettingsDaemon/Power"
+GSD_POWER_KEYBOARD_INTERFACE = "org.gnome.SettingsDaemon.Power.Keyboard"
 DBUS_INT32_MAX = 2**31 - 1
+PERCENT_MAX = 100
 RETRY_SECONDS = 30
 
 STATE_ROOT = Path(
@@ -135,6 +139,18 @@ def keyboard_backlight_proxy(path: str) -> Gio.DBusProxy:
     )
 
 
+def gnome_keyboard_backlight_proxy() -> Gio.DBusProxy:
+    return Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SESSION,
+        Gio.DBusProxyFlags.NONE,
+        None,
+        GSD_POWER_NAME,
+        GSD_POWER_PATH,
+        GSD_POWER_KEYBOARD_INTERFACE,
+        None,
+    )
+
+
 def keyboard_backlight_paths() -> list[str]:
     result = upower_proxy().call_sync(
         "EnumerateKbdBacklights",
@@ -173,11 +189,116 @@ def read_keyboard_backlight(proxy: Gio.DBusProxy) -> int:
     return brightness
 
 
+def read_keyboard_backlight_maximum(proxy: Gio.DBusProxy) -> int:
+    result = proxy.call_sync(
+        "GetMaxBrightness",
+        None,
+        Gio.DBusCallFlags.NONE,
+        -1,
+        None,
+    )
+    if result is None:
+        raise RuntimeError("UPower returned no keyboard backlight maximum")
+
+    maximum = result.unpack()[0]
+    if (
+        isinstance(maximum, bool)
+        or not isinstance(maximum, int)
+        or not 1 <= maximum <= DBUS_INT32_MAX
+    ):
+        raise RuntimeError("UPower returned an invalid keyboard backlight maximum")
+    return maximum
+
+
 def keyboard_backlight_brightnesses() -> dict[str, int]:
     return {
         path: read_keyboard_backlight(keyboard_backlight_proxy(path))
         for path in keyboard_backlight_paths()
     }
+
+
+def keyboard_backlight_percentage(brightnesses: dict[str, int]) -> int | None:
+    if not brightnesses:
+        return None
+
+    path = next(
+        (path for path in keyboard_backlight_paths() if path in brightnesses), None
+    )
+    if path is None:
+        raise RuntimeError("the saved keyboard backlight is no longer available")
+
+    maximum = read_keyboard_backlight_maximum(keyboard_backlight_proxy(path))
+    brightness = brightnesses[path]
+    if brightness > maximum:
+        raise RuntimeError("saved keyboard backlight brightness exceeds its maximum")
+
+    # Match GNOME Settings Daemon's nearest-integer hardware→percentage mapping.
+    return (brightness * PERCENT_MAX + maximum // 2) // maximum
+
+
+def read_gnome_keyboard_backlight(proxy: Gio.DBusProxy) -> int:
+    result = proxy.call_sync(
+        "org.freedesktop.DBus.Properties.Get",
+        GLib.Variant(
+            "(ss)", (GSD_POWER_KEYBOARD_INTERFACE, "Brightness")
+        ),
+        Gio.DBusCallFlags.NONE,
+        -1,
+        None,
+    )
+    if result is None:
+        raise RuntimeError("GNOME returned no keyboard backlight percentage")
+
+    percentage = result.unpack()[0]
+    if (
+        isinstance(percentage, bool)
+        or not isinstance(percentage, int)
+        or not 0 <= percentage <= PERCENT_MAX
+    ):
+        raise RuntimeError("GNOME returned an invalid keyboard backlight percentage")
+    return percentage
+
+
+def gnome_keyboard_backlight_percentage() -> int:
+    return read_gnome_keyboard_backlight(gnome_keyboard_backlight_proxy())
+
+
+def set_gnome_keyboard_backlight(percentage: int) -> bool:
+    try:
+        proxy = gnome_keyboard_backlight_proxy()
+        # Always set: direct UPower writes can leave this equal-valued cache stale,
+        # and GNOME Shell needs the resulting PropertiesChanged signal.
+        result = proxy.call_sync(
+            "org.freedesktop.DBus.Properties.Set",
+            GLib.Variant(
+                "(ssv)",
+                (
+                    GSD_POWER_KEYBOARD_INTERFACE,
+                    "Brightness",
+                    GLib.Variant("i", percentage),
+                ),
+            ),
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+        )
+        if result is None:
+            raise RuntimeError("GNOME returned no keyboard backlight result")
+        if read_gnome_keyboard_backlight(proxy) != percentage:
+            LOG.error(
+                "GNOME did not retain keyboard backlight at %s%%", percentage
+            )
+            return False
+    except (GLib.Error, RuntimeError) as error:
+        LOG.error(
+            "Could not set GNOME keyboard backlight to %s%%: %s",
+            percentage,
+            error,
+        )
+        return False
+
+    LOG.info("Set GNOME keyboard backlight to %s%%", percentage)
+    return True
 
 
 def set_keyboard_backlight(path: str, brightness: int) -> bool:
@@ -213,8 +334,12 @@ def set_keyboard_backlight(path: str, brightness: int) -> bool:
     return True
 
 
-def set_keyboard_backlights(brightnesses: dict[str, int]) -> bool:
+def set_keyboard_backlights(
+    brightnesses: dict[str, int], percentage: int | None
+) -> bool:
     success = True
+    if percentage is not None and not set_gnome_keyboard_backlight(percentage):
+        success = False
     for path, brightness in brightnesses.items():
         if not set_keyboard_backlight(path, brightness):
             success = False
@@ -222,11 +347,13 @@ def set_keyboard_backlights(brightnesses: dict[str, int]) -> bool:
 
 
 def state_snapshot() -> dict[str, Any]:
+    backlights = keyboard_backlight_brightnesses()
     return {
-        "version": 2,
+        "version": 3,
         "extension_enabled": extension_is_enabled(),
         "clock_show_seconds": seconds_are_enabled(),
-        "keyboard_backlights": keyboard_backlight_brightnesses(),
+        "keyboard_backlights": backlights,
+        "keyboard_backlight_percentage": keyboard_backlight_percentage(backlights),
     }
 
 
@@ -234,12 +361,12 @@ def validate_state(state: object) -> dict[str, Any]:
     if not isinstance(state, dict):
         raise ValueError("state is not a JSON object")
     version = state.get("version")
-    if isinstance(version, bool) or version not in (1, 2):
+    if isinstance(version, bool) or version not in (1, 2, 3):
         raise ValueError("unsupported state version")
     for key in ("extension_enabled", "clock_show_seconds"):
         if not isinstance(state.get(key), bool):
             raise ValueError(f"invalid {key!r} value")
-    if version == 2:
+    if version in (2, 3):
         backlights = state.get("keyboard_backlights")
         if not isinstance(backlights, dict):
             raise ValueError("invalid keyboard backlight state")
@@ -252,6 +379,17 @@ def validate_state(state: object) -> dict[str, Any]:
                 or not 0 <= brightness <= DBUS_INT32_MAX
             ):
                 raise ValueError("invalid keyboard backlight brightness")
+        if version == 3:
+            percentage = state.get("keyboard_backlight_percentage")
+            if backlights:
+                if (
+                    isinstance(percentage, bool)
+                    or not isinstance(percentage, int)
+                    or not 0 <= percentage <= PERCENT_MAX
+                ):
+                    raise ValueError("invalid keyboard backlight percentage")
+            elif percentage is not None:
+                raise ValueError("invalid keyboard backlight percentage")
     return state
 
 
@@ -299,23 +437,32 @@ def apply_battery_policy() -> bool:
             LOG.error("Cannot capture the pre-battery state: %s", error)
             return False
         LOG.info("Saved the pre-battery state")
-    elif saved_state["version"] == 1:
+    elif saved_state["version"] in (1, 2):
         try:
+            backlights = (
+                keyboard_backlight_brightnesses()
+                if saved_state["version"] == 1
+                else saved_state["keyboard_backlights"]
+            )
             saved_state = {
                 **saved_state,
-                "version": 2,
-                "keyboard_backlights": keyboard_backlight_brightnesses(),
+                "version": 3,
+                "keyboard_backlights": backlights,
+                "keyboard_backlight_percentage": keyboard_backlight_percentage(
+                    backlights
+                ),
             }
             save_state(saved_state)
         except (GLib.Error, OSError, RuntimeError) as error:
-            LOG.error("Cannot add the keyboard backlight to saved state: %s", error)
+            LOG.error("Cannot update the saved keyboard backlight state: %s", error)
             return False
-        LOG.info("Added the keyboard backlight to saved pre-battery state")
+        LOG.info("Updated the saved pre-battery keyboard backlight state")
 
     extension_ok = set_extension_enabled(False)
     seconds_ok = set_seconds_enabled(False)
+    backlights = saved_state["keyboard_backlights"]
     backlight_ok = set_keyboard_backlights(
-        {path: 0 for path in saved_state["keyboard_backlights"]}
+        {path: 0 for path in backlights}, 0 if backlights else None
     )
     return extension_ok and seconds_ok and backlight_ok
 
@@ -330,11 +477,25 @@ def restore_pre_battery_state() -> bool:
     if saved_state is None:
         return True
 
+    backlight_percentage = None
+    if saved_state["version"] == 2:
+        try:
+            backlight_percentage = keyboard_backlight_percentage(
+                saved_state["keyboard_backlights"]
+            )
+        except (GLib.Error, RuntimeError) as error:
+            LOG.error("Cannot restore the GNOME keyboard backlight state: %s", error)
+            return False
+    elif saved_state["version"] == 3:
+        backlight_percentage = saved_state["keyboard_backlight_percentage"]
+
     extension_ok = set_extension_enabled(saved_state["extension_enabled"])
     seconds_ok = set_seconds_enabled(saved_state["clock_show_seconds"])
     backlight_ok = True
-    if saved_state["version"] == 2:
-        backlight_ok = set_keyboard_backlights(saved_state["keyboard_backlights"])
+    if saved_state["version"] in (2, 3):
+        backlight_ok = set_keyboard_backlights(
+            saved_state["keyboard_backlights"], backlight_percentage
+        )
     if not (extension_ok and seconds_ok and backlight_ok):
         LOG.error("Keeping saved state so restoration can be retried")
         return False
@@ -502,10 +663,19 @@ def print_status() -> int:
     except (GLib.Error, RuntimeError) as error:
         backlight_description = f"unavailable ({error})"
 
+    try:
+        gnome_percentage = gnome_keyboard_backlight_percentage()
+        gnome_backlight_description = (
+            f"{'on' if gnome_percentage else 'off'} ({gnome_percentage}%)"
+        )
+    except (GLib.Error, RuntimeError) as error:
+        gnome_backlight_description = f"unavailable ({error})"
+
     print(f"Power source: {power_source}")
     print(f"Extension:    {extension_state} ({EXTENSION_UUID})")
     print(f"Clock seconds: {'on' if seconds_are_enabled() else 'off'}")
     print(f"Keyboard backlight: {backlight_description}")
+    print(f"GNOME keyboard menu: {gnome_backlight_description}")
     print(f"Saved state:  {saved_description}")
     return 0
 

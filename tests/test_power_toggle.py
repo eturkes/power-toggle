@@ -40,6 +40,7 @@ class PolicyStateTests(unittest.TestCase):
             "/org/freedesktop/UPower/KbdBacklight/tpacpiookbd_backlight"
         )
         self.keyboard_backlights = {self.keyboard_path: 2}
+        self.gnome_keyboard_percentage = 100
         self.behavior_patches = (
             mock.patch.object(
                 POWER_TOGGLE,
@@ -68,6 +69,15 @@ class PolicyStateTests(unittest.TestCase):
             ),
             mock.patch.object(
                 POWER_TOGGLE,
+                "keyboard_backlight_percentage",
+                side_effect=lambda brightnesses: (
+                    brightnesses[self.keyboard_path] * 50
+                    if brightnesses
+                    else None
+                ),
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
                 "set_keyboard_backlights",
                 side_effect=self.set_keyboard_backlights,
             ),
@@ -84,22 +94,27 @@ class PolicyStateTests(unittest.TestCase):
         self.desktop["seconds"] = enabled
         return True
 
-    def set_keyboard_backlights(self, brightnesses: dict[str, int]) -> bool:
+    def set_keyboard_backlights(
+        self, brightnesses: dict[str, int], percentage: int | None
+    ) -> bool:
         self.keyboard_backlights.update(brightnesses)
+        self.gnome_keyboard_percentage = percentage
         return True
 
     def test_battery_restart_preserves_baseline_then_restores(self) -> None:
         self.assertTrue(POWER_TOGGLE.apply_battery_policy())
         self.assertEqual(self.desktop, {"extension": False, "seconds": False})
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.assertEqual(self.gnome_keyboard_percentage, 0)
         baseline = POWER_TOGGLE.load_saved_state()
         self.assertEqual(
             baseline,
             {
-                "version": 2,
+                "version": 3,
                 "extension_enabled": True,
                 "clock_show_seconds": True,
                 "keyboard_backlights": {self.keyboard_path: 2},
+                "keyboard_backlight_percentage": 100,
             },
         )
 
@@ -109,19 +124,23 @@ class PolicyStateTests(unittest.TestCase):
         self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
         self.assertEqual(self.desktop, {"extension": True, "seconds": True})
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+        self.assertEqual(self.gnome_keyboard_percentage, 100)
         self.assertFalse(self.state_file.exists())
 
     def test_restore_preserves_originally_disabled_preferences(self) -> None:
         self.desktop = {"extension": False, "seconds": False}
         self.keyboard_backlights[self.keyboard_path] = 0
+        self.gnome_keyboard_percentage = 0
         self.assertTrue(POWER_TOGGLE.apply_battery_policy())
 
         self.desktop = {"extension": True, "seconds": True}
         self.keyboard_backlights[self.keyboard_path] = 2
+        self.gnome_keyboard_percentage = 100
         self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
 
         self.assertEqual(self.desktop, {"extension": False, "seconds": False})
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.assertEqual(self.gnome_keyboard_percentage, 0)
 
     def test_invalid_state_blocks_mutation(self) -> None:
         self.state_file.parent.mkdir(parents=True)
@@ -136,10 +155,11 @@ class PolicyStateTests(unittest.TestCase):
     def test_failed_restore_retains_state_for_retry(self) -> None:
         POWER_TOGGLE.save_state(
             {
-                "version": 2,
+                "version": 3,
                 "extension_enabled": True,
                 "clock_show_seconds": True,
                 "keyboard_backlights": {self.keyboard_path: 2},
+                "keyboard_backlight_percentage": 100,
             }
         )
         POWER_TOGGLE.set_extension_enabled.side_effect = lambda _enabled: False
@@ -151,17 +171,18 @@ class PolicyStateTests(unittest.TestCase):
 
     def test_state_file_is_private_json(self) -> None:
         state = {
-            "version": 2,
+            "version": 3,
             "extension_enabled": True,
             "clock_show_seconds": False,
             "keyboard_backlights": {self.keyboard_path: 2},
+            "keyboard_backlight_percentage": 100,
         }
         POWER_TOGGLE.save_state(state)
 
         self.assertEqual(json.loads(self.state_file.read_text(encoding="utf-8")), state)
         self.assertEqual(self.state_file.stat().st_mode & 0o777, 0o600)
 
-    def test_legacy_state_adds_keyboard_baseline_on_battery(self) -> None:
+    def test_v1_state_adds_keyboard_baseline_on_battery(self) -> None:
         POWER_TOGGLE.save_state(
             {
                 "version": 1,
@@ -174,16 +195,66 @@ class PolicyStateTests(unittest.TestCase):
         self.assertEqual(
             POWER_TOGGLE.load_saved_state(),
             {
+                "version": 3,
+                "extension_enabled": True,
+                "clock_show_seconds": True,
+                "keyboard_backlights": {self.keyboard_path: 2},
+                "keyboard_backlight_percentage": 100,
+            },
+        )
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.assertEqual(self.gnome_keyboard_percentage, 0)
+
+        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+        self.assertEqual(self.gnome_keyboard_percentage, 100)
+
+    def test_v2_state_adds_gnome_menu_baseline_on_battery(self) -> None:
+        POWER_TOGGLE.save_state(
+            {
                 "version": 2,
                 "extension_enabled": True,
                 "clock_show_seconds": True,
                 "keyboard_backlights": {self.keyboard_path: 2},
+            }
+        )
+        self.keyboard_backlights[self.keyboard_path] = 0
+        self.gnome_keyboard_percentage = 0
+
+        self.assertTrue(POWER_TOGGLE.apply_battery_policy())
+        self.assertEqual(
+            POWER_TOGGLE.load_saved_state(),
+            {
+                "version": 3,
+                "extension_enabled": True,
+                "clock_show_seconds": True,
+                "keyboard_backlights": {self.keyboard_path: 2},
+                "keyboard_backlight_percentage": 100,
             },
         )
-        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.assertEqual(self.gnome_keyboard_percentage, 0)
 
         self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+        self.assertEqual(self.gnome_keyboard_percentage, 100)
+
+    def test_v2_state_restores_gnome_menu_on_external_power(self) -> None:
+        POWER_TOGGLE.save_state(
+            {
+                "version": 2,
+                "extension_enabled": True,
+                "clock_show_seconds": True,
+                "keyboard_backlights": {self.keyboard_path: 2},
+            }
+        )
+        self.keyboard_backlights[self.keyboard_path] = 0
+        self.gnome_keyboard_percentage = 0
+
+        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+        self.assertEqual(self.gnome_keyboard_percentage, 100)
+        self.assertFalse(self.state_file.exists())
 
     def test_legacy_state_restores_without_mutating_keyboard(self) -> None:
         POWER_TOGGLE.save_state(
@@ -211,16 +282,32 @@ class PolicyStateTests(unittest.TestCase):
         POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
         self.assertFalse(self.state_file.exists())
 
+    def test_keyboard_percentage_failure_blocks_all_mutation(self) -> None:
+        POWER_TOGGLE.keyboard_backlight_percentage.side_effect = RuntimeError(
+            "keyboard backlight maximum unavailable"
+        )
+
+        with self.assertLogs("power-toggle", level="ERROR"):
+            self.assertFalse(POWER_TOGGLE.apply_battery_policy())
+
+        POWER_TOGGLE.set_extension_enabled.assert_not_called()
+        POWER_TOGGLE.set_seconds_enabled.assert_not_called()
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertFalse(self.state_file.exists())
+
     def test_failed_keyboard_restore_retains_state_for_retry(self) -> None:
         POWER_TOGGLE.save_state(
             {
-                "version": 2,
+                "version": 3,
                 "extension_enabled": True,
                 "clock_show_seconds": True,
                 "keyboard_backlights": {self.keyboard_path: 2},
+                "keyboard_backlight_percentage": 100,
             }
         )
-        POWER_TOGGLE.set_keyboard_backlights.side_effect = lambda _state: False
+        POWER_TOGGLE.set_keyboard_backlights.side_effect = (
+            lambda _state, _percentage: False
+        )
 
         with self.assertLogs("power-toggle", level="ERROR"):
             self.assertFalse(POWER_TOGGLE.restore_pre_battery_state())
@@ -235,14 +322,42 @@ class PolicyStateTests(unittest.TestCase):
             ):
                 POWER_TOGGLE.validate_state(
                     {
-                        "version": 2,
+                        "version": 3,
                         "extension_enabled": True,
                         "clock_show_seconds": True,
                         "keyboard_backlights": {
                             self.keyboard_path: brightness
                         },
+                        "keyboard_backlight_percentage": 100,
                     }
                 )
+
+    def test_invalid_keyboard_percentage_is_rejected(self) -> None:
+        for percentage in (-1, 101, True, None):
+            with (
+                self.subTest(percentage=percentage),
+                self.assertRaisesRegex(ValueError, "keyboard backlight percentage"),
+            ):
+                POWER_TOGGLE.validate_state(
+                    {
+                        "version": 3,
+                        "extension_enabled": True,
+                        "clock_show_seconds": True,
+                        "keyboard_backlights": {self.keyboard_path: 2},
+                        "keyboard_backlight_percentage": percentage,
+                    }
+                )
+
+    def test_empty_keyboard_state_requires_no_gnome_percentage(self) -> None:
+        state = {
+            "version": 3,
+            "extension_enabled": True,
+            "clock_show_seconds": True,
+            "keyboard_backlights": {},
+            "keyboard_backlight_percentage": None,
+        }
+
+        self.assertIs(POWER_TOGGLE.validate_state(state), state)
 
 
 class ExtensionMutationTests(unittest.TestCase):
@@ -292,6 +407,31 @@ class KeyboardBacklightMutationTests(unittest.TestCase):
 
         self.assertEqual(brightnesses, {self.PATH: 2})
 
+    def test_derives_gnome_percentage_from_saved_hardware_level(self) -> None:
+        proxy = mock.Mock()
+        proxy.call_sync.return_value = POWER_TOGGLE.GLib.Variant("(i)", (3,))
+
+        with (
+            mock.patch.object(
+                POWER_TOGGLE, "keyboard_backlight_paths", return_value=[self.PATH]
+            ),
+            mock.patch.object(
+                POWER_TOGGLE, "keyboard_backlight_proxy", return_value=proxy
+            ),
+        ):
+            percentage = POWER_TOGGLE.keyboard_backlight_percentage(
+                {self.PATH: 2}
+            )
+
+        self.assertEqual(percentage, 67)
+        self.assertEqual(proxy.call_sync.call_args.args[0], "GetMaxBrightness")
+
+    def test_empty_backlight_state_has_no_gnome_percentage(self) -> None:
+        with mock.patch.object(POWER_TOGGLE, "keyboard_backlight_paths") as paths:
+            self.assertIsNone(POWER_TOGGLE.keyboard_backlight_percentage({}))
+
+        paths.assert_not_called()
+
     def test_unchanged_brightness_avoids_set_call(self) -> None:
         proxy = mock.Mock()
         proxy.call_sync.return_value = POWER_TOGGLE.GLib.Variant("(i)", (2,))
@@ -340,6 +480,107 @@ class KeyboardBacklightMutationTests(unittest.TestCase):
             self.assertLogs("power-toggle", level="ERROR"),
         ):
             self.assertFalse(POWER_TOGGLE.set_keyboard_backlight(self.PATH, 0))
+
+    def test_updates_gnome_before_restoring_exact_hardware_level(self) -> None:
+        mutations = mock.Mock()
+        mutations.gnome.return_value = True
+        mutations.upower.return_value = True
+
+        with (
+            mock.patch.object(
+                POWER_TOGGLE,
+                "set_gnome_keyboard_backlight",
+                side_effect=mutations.gnome,
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "set_keyboard_backlight",
+                side_effect=mutations.upower,
+            ),
+        ):
+            self.assertTrue(
+                POWER_TOGGLE.set_keyboard_backlights({self.PATH: 2}, 100)
+            )
+
+        self.assertEqual(
+            mutations.mock_calls,
+            [mock.call.gnome(100), mock.call.upower(self.PATH, 2)],
+        )
+
+    def test_gnome_failure_still_applies_exact_hardware_level(self) -> None:
+        mutations = mock.Mock()
+        mutations.gnome.return_value = False
+        mutations.upower.return_value = True
+
+        with (
+            mock.patch.object(
+                POWER_TOGGLE,
+                "set_gnome_keyboard_backlight",
+                side_effect=mutations.gnome,
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "set_keyboard_backlight",
+                side_effect=mutations.upower,
+            ),
+        ):
+            self.assertFalse(
+                POWER_TOGGLE.set_keyboard_backlights({self.PATH: 2}, 100)
+            )
+
+        self.assertEqual(
+            mutations.mock_calls,
+            [mock.call.gnome(100), mock.call.upower(self.PATH, 2)],
+        )
+
+
+class GnomeKeyboardBacklightMutationTests(unittest.TestCase):
+    def test_sets_property_even_when_cached_percentage_may_match(self) -> None:
+        proxy = mock.Mock()
+        proxy.call_sync.side_effect = (
+            POWER_TOGGLE.GLib.Variant("()", ()),
+            POWER_TOGGLE.GLib.Variant(
+                "(v)", (POWER_TOGGLE.GLib.Variant("i", 0),)
+            ),
+        )
+
+        with mock.patch.object(
+            POWER_TOGGLE, "gnome_keyboard_backlight_proxy", return_value=proxy
+        ):
+            self.assertTrue(POWER_TOGGLE.set_gnome_keyboard_backlight(0))
+
+        self.assertEqual(
+            [call.args[0] for call in proxy.call_sync.call_args_list],
+            [
+                "org.freedesktop.DBus.Properties.Set",
+                "org.freedesktop.DBus.Properties.Get",
+            ],
+        )
+        self.assertEqual(
+            proxy.call_sync.call_args_list[0].args[1].unpack(),
+            (
+                POWER_TOGGLE.GSD_POWER_KEYBOARD_INTERFACE,
+                "Brightness",
+                0,
+            ),
+        )
+
+    def test_failed_property_verification_is_retryable_failure(self) -> None:
+        proxy = mock.Mock()
+        proxy.call_sync.side_effect = (
+            POWER_TOGGLE.GLib.Variant("()", ()),
+            POWER_TOGGLE.GLib.Variant(
+                "(v)", (POWER_TOGGLE.GLib.Variant("i", 100),)
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                POWER_TOGGLE, "gnome_keyboard_backlight_proxy", return_value=proxy
+            ),
+            self.assertLogs("power-toggle", level="ERROR"),
+        ):
+            self.assertFalse(POWER_TOGGLE.set_gnome_keyboard_backlight(0))
 
 
 if __name__ == "__main__":

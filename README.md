@@ -5,9 +5,9 @@ changes:
 
 - On battery: disable `system-monitor-next@paradoxxx.zero.gmail.com` and hide
   seconds in the GNOME clock, then turn off every keyboard backlight reported
-  by UPower.
+  by UPower and synchronize GNOME's keyboard quick-setting button.
 - On external power: restore all managed values to exactly how they were before
-  the switch to battery.
+  the switch to battery, including the quick-setting state.
 
 The pre-battery values are saved under
 `~/.local/state/power-toggle/` (or `$XDG_STATE_HOME/power-toggle/`). This means a
@@ -32,6 +32,9 @@ Show the current source and managed settings without changing anything:
 ```sh
 ./power-toggle status
 ```
+
+The status includes both each UPower hardware level and GNOME's cached keyboard
+menu percentage, making any desktop/hardware mismatch visible.
 
 Apply the policy once and exit:
 
