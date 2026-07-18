@@ -18,4 +18,4 @@ fi
 /usr/bin/rm -f -- "$installed_binary" "$installed_unit"
 /usr/bin/systemctl --user daemon-reload
 
-printf 'Stopped and removed power-toggle.service and restored saved GNOME state\n'
+printf 'Stopped and removed power-toggle.service and restored saved desktop state\n'

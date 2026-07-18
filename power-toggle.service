@@ -1,5 +1,5 @@
 [Unit]
-Description=Apply GNOME settings based on the current power source
+Description=Apply desktop settings based on the current power source
 After=graphical-session.target
 PartOf=graphical-session.target
 

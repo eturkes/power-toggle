@@ -1,11 +1,12 @@
 # Power Toggle
 
-`power-toggle` watches UPower and adjusts two GNOME preferences when the power
-source changes:
+`power-toggle` watches UPower and adjusts desktop state when the power source
+changes:
 
 - On battery: disable `system-monitor-next@paradoxxx.zero.gmail.com` and hide
-  seconds in the GNOME clock.
-- On external power: restore both preferences to exactly how they were before
+  seconds in the GNOME clock, then turn off every keyboard backlight reported
+  by UPower.
+- On external power: restore all managed values to exactly how they were before
   the switch to battery.
 
 The pre-battery values are saved under
@@ -20,7 +21,7 @@ successful retry.
 ## Requirements
 
 - GNOME Shell with `system-monitor-next@paradoxxx.zero.gmail.com` installed
-- UPower
+- UPower with `org.freedesktop.UPower.EnumerateKbdBacklights`
 - System Python 3 with PyGObject (`Gio`, `GLib`, and `GLibUnix`)
 - `gnome-extensions` and a systemd user manager
 
