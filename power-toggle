@@ -1,0 +1,404 @@
+#!/usr/bin/python3
+"""Apply small GNOME desktop changes while the machine is on battery power."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import gi
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLibUnix", "2.0")
+from gi.repository import Gio, GLib, GLibUnix  # noqa: E402
+
+
+EXTENSION_UUID = "system-monitor-next@paradoxxx.zero.gmail.com"
+GNOME_EXTENSIONS = "/usr/bin/gnome-extensions"
+
+UPOWER_NAME = "org.freedesktop.UPower"
+UPOWER_PATH = "/org/freedesktop/UPower"
+UPOWER_INTERFACE = "org.freedesktop.UPower"
+RETRY_SECONDS = 30
+
+STATE_ROOT = Path(
+    os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+)
+STATE_DIR = STATE_ROOT / "power-toggle"
+STATE_FILE = STATE_DIR / "pre-battery-state.json"
+LOCK_FILE = STATE_DIR / "monitor.lock"
+
+LOG = logging.getLogger("power-toggle")
+
+
+def gnome_shell_settings() -> Gio.Settings:
+    return Gio.Settings.new("org.gnome.shell")
+
+
+def interface_settings() -> Gio.Settings:
+    return Gio.Settings.new("org.gnome.desktop.interface")
+
+
+def extension_is_enabled() -> bool:
+    enabled = gnome_shell_settings().get_strv("enabled-extensions")
+    return EXTENSION_UUID in enabled
+
+
+def extension_is_installed() -> bool:
+    result = subprocess.run(
+        [GNOME_EXTENSIONS, "info", EXTENSION_UUID],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def set_extension_enabled(enabled: bool) -> bool:
+    if extension_is_enabled() == enabled:
+        return True
+
+    action = "enable" if enabled else "disable"
+    result = subprocess.run(
+        [GNOME_EXTENSIONS, action, EXTENSION_UUID],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        LOG.error("Could not %s %s: %s", action, EXTENSION_UUID, detail)
+        return False
+
+    if extension_is_enabled() != enabled:
+        LOG.error("GNOME did not retain the requested extension state")
+        return False
+
+    LOG.info("%sd %s", action.capitalize(), EXTENSION_UUID)
+    return True
+
+
+def seconds_are_enabled() -> bool:
+    return interface_settings().get_boolean("clock-show-seconds")
+
+
+def set_seconds_enabled(enabled: bool) -> bool:
+    settings = interface_settings()
+    if settings.get_boolean("clock-show-seconds") == enabled:
+        return True
+
+    if not settings.set_boolean("clock-show-seconds", enabled):
+        LOG.error("Could not set org.gnome.desktop.interface clock-show-seconds")
+        return False
+
+    if settings.get_boolean("clock-show-seconds") != enabled:
+        LOG.error("GNOME did not retain the requested seconds setting")
+        return False
+
+    LOG.info("Turned clock seconds %s", "on" if enabled else "off")
+    return True
+
+
+def state_snapshot() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "extension_enabled": extension_is_enabled(),
+        "clock_show_seconds": seconds_are_enabled(),
+    }
+
+
+def validate_state(state: object) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        raise ValueError("state is not a JSON object")
+    if state.get("version") != 1:
+        raise ValueError("unsupported state version")
+    for key in ("extension_enabled", "clock_show_seconds"):
+        if not isinstance(state.get(key), bool):
+            raise ValueError(f"invalid {key!r} value")
+    return state
+
+
+def load_saved_state() -> dict[str, Any] | None:
+    try:
+        with STATE_FILE.open(encoding="utf-8") as state_file:
+            return validate_state(json.load(state_file))
+    except FileNotFoundError:
+        return None
+
+
+def save_state(state: dict[str, Any]) -> None:
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".pre-battery-state-", dir=STATE_DIR, text=True
+    )
+    try:
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+            json.dump(state, temporary_file, sort_keys=True)
+            temporary_file.write("\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_name, STATE_FILE)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def apply_battery_policy() -> bool:
+    try:
+        saved_state = load_saved_state()
+    except (OSError, ValueError) as error:
+        LOG.error("Cannot read %s: %s", STATE_FILE, error)
+        return False
+
+    if saved_state is None:
+        saved_state = state_snapshot()
+        try:
+            save_state(saved_state)
+        except OSError as error:
+            LOG.error("Cannot save the pre-battery state: %s", error)
+            return False
+        LOG.info("Saved the pre-battery GNOME state")
+
+    extension_ok = set_extension_enabled(False)
+    seconds_ok = set_seconds_enabled(False)
+    return extension_ok and seconds_ok
+
+
+def restore_pre_battery_state() -> bool:
+    try:
+        saved_state = load_saved_state()
+    except (OSError, ValueError) as error:
+        LOG.error("Cannot read %s: %s", STATE_FILE, error)
+        return False
+
+    if saved_state is None:
+        return True
+
+    extension_ok = set_extension_enabled(saved_state["extension_enabled"])
+    seconds_ok = set_seconds_enabled(saved_state["clock_show_seconds"])
+    if not (extension_ok and seconds_ok):
+        LOG.error("Keeping saved state so restoration can be retried")
+        return False
+
+    try:
+        STATE_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        LOG.error(
+            "State was restored, but %s could not be removed: %s", STATE_FILE, error
+        )
+        return False
+
+    LOG.info("Restored the pre-battery GNOME state")
+    return True
+
+
+def upower_proxy() -> Gio.DBusProxy:
+    return Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SYSTEM,
+        Gio.DBusProxyFlags.GET_INVALIDATED_PROPERTIES,
+        None,
+        UPOWER_NAME,
+        UPOWER_PATH,
+        UPOWER_INTERFACE,
+        None,
+    )
+
+
+def on_battery(proxy: Gio.DBusProxy) -> bool:
+    value = proxy.get_cached_property("OnBattery")
+    if value is None:
+        raise RuntimeError("UPower did not provide its OnBattery property")
+    return value.get_boolean()
+
+
+def apply_current_power_state(proxy: Gio.DBusProxy) -> bool:
+    try:
+        using_battery = on_battery(proxy)
+    except RuntimeError as error:
+        LOG.error("Cannot determine the current power source: %s", error)
+        return False
+
+    LOG.info("Power source: %s", "battery" if using_battery else "external power")
+    if using_battery:
+        return apply_battery_policy()
+    return restore_pre_battery_state()
+
+
+def acquire_monitor_lock() -> Any:
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_file = LOCK_FILE.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        raise RuntimeError("another power-toggle monitor is already running") from None
+    return lock_file
+
+
+def monitor() -> int:
+    try:
+        monitor_lock = acquire_monitor_lock()
+    except (OSError, RuntimeError) as error:
+        LOG.error("Cannot start: %s", error)
+        return 1
+
+    try:
+        proxy = upower_proxy()
+    except GLib.Error as error:
+        LOG.error("Cannot connect to UPower: %s", error.message)
+        monitor_lock.close()
+        return 1
+
+    loop = GLib.MainLoop()
+    last_power_state: bool | None = None
+    retry_source: int | None = None
+
+    def cancel_retry() -> None:
+        nonlocal retry_source
+        if retry_source is not None:
+            GLib.source_remove(retry_source)
+            retry_source = None
+
+    def retry() -> GLib.SOURCE_REMOVE:
+        nonlocal retry_source
+        retry_source = None
+        reconcile()
+        return GLib.SOURCE_REMOVE
+
+    def schedule_retry() -> None:
+        nonlocal retry_source
+        if retry_source is None:
+            LOG.info("Retrying the power policy in %s seconds", RETRY_SECONDS)
+            retry_source = GLib.timeout_add_seconds(RETRY_SECONDS, retry)
+
+    def reconcile(force: bool = False) -> None:
+        nonlocal last_power_state
+        try:
+            current_power_state = on_battery(proxy)
+        except RuntimeError as error:
+            LOG.warning("Waiting for UPower: %s", error)
+            schedule_retry()
+            return
+        if not force and current_power_state == last_power_state:
+            cancel_retry()
+            return
+        if apply_current_power_state(proxy):
+            last_power_state = current_power_state
+            cancel_retry()
+        else:
+            schedule_retry()
+
+    def properties_changed(
+        _proxy: Gio.DBusProxy,
+        changed_properties: GLib.Variant,
+        invalidated_properties: list[str],
+    ) -> None:
+        if (
+            "OnBattery" in changed_properties.keys()
+            or "OnBattery" in invalidated_properties
+        ):
+            reconcile()
+
+    def name_owner_changed(_proxy: Gio.DBusProxy, _parameter: Any) -> None:
+        nonlocal last_power_state
+        last_power_state = None
+        if proxy.get_name_owner() is not None:
+            reconcile(force=True)
+
+    def stop_loop() -> GLib.SOURCE_REMOVE:
+        loop.quit()
+        return GLib.SOURCE_REMOVE
+
+    proxy.connect("g-properties-changed", properties_changed)
+    proxy.connect("notify::g-name-owner", name_owner_changed)
+    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop_loop)
+    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop_loop)
+
+    reconcile(force=True)
+    LOG.info("Watching UPower for power-source changes")
+    loop.run()
+    monitor_lock.close()
+    return 0
+
+
+def print_status() -> int:
+    try:
+        proxy = upower_proxy()
+        power_source = "battery" if on_battery(proxy) else "external power"
+    except (GLib.Error, RuntimeError) as error:
+        power_source = f"unknown ({error})"
+
+    if extension_is_installed():
+        extension_state = "enabled" if extension_is_enabled() else "disabled"
+    else:
+        extension_state = "not installed"
+
+    try:
+        saved_state = load_saved_state()
+        saved_description = (
+            json.dumps(saved_state, sort_keys=True) if saved_state else "none"
+        )
+    except (OSError, ValueError) as error:
+        saved_description = f"invalid ({error})"
+
+    print(f"Power source: {power_source}")
+    print(f"Extension:    {extension_state} ({EXTENSION_UUID})")
+    print(f"Clock seconds: {'on' if seconds_are_enabled() else 'off'}")
+    print(f"Saved state:  {saved_description}")
+    return 0
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Disable system-monitor-next and GNOME clock seconds on battery, "
+            "then restore their previous state on external power."
+        )
+    )
+    parser.add_argument(
+        "command",
+        choices=("monitor", "once", "restore", "status"),
+        nargs="?",
+        default="monitor",
+        help="operation to perform (default: monitor)",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="power-toggle: %(message)s")
+    arguments = parse_arguments()
+
+    if arguments.command == "monitor":
+        return monitor()
+    if arguments.command == "restore":
+        return 0 if restore_pre_battery_state() else 1
+    if arguments.command == "status":
+        return print_status()
+
+    try:
+        proxy = upower_proxy()
+    except GLib.Error as error:
+        LOG.error("Cannot connect to UPower: %s", error.message)
+        return 1
+    return 0 if apply_current_power_state(proxy) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
