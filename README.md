@@ -14,9 +14,11 @@ The pre-battery values are saved under
 logout, reboot, or watcher restart while on battery does not overwrite the
 values that need to be restored.
 
-The watcher is event-driven: it sleeps until UPower reports a change. A
-30-second timer is created only after an action fails, then removed after a
-successful retry.
+The watcher is event-driven: it sleeps until UPower reports a power-source
+change or GNOME Shell reports a managed extension-state change. Watching the
+runtime state makes a late extension activation during Shell startup
+self-correcting. A 30-second timer is created only after an action fails, then
+removed after a successful retry.
 
 ## Requirements
 
@@ -33,8 +35,10 @@ Show the current source and managed settings without changing anything:
 ./power-toggle status
 ```
 
-The status includes both each UPower hardware level and GNOME's cached keyboard
-menu percentage, making any desktop/hardware mismatch visible.
+The status distinguishes the extension's configured and live runtime states.
+It also includes each UPower hardware level and GNOME's cached keyboard menu
+percentage, making configuration/runtime and desktop/hardware mismatches
+visible.
 
 Apply the policy once and exit:
 

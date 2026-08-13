@@ -361,23 +361,239 @@ class PolicyStateTests(unittest.TestCase):
 
 
 class ExtensionMutationTests(unittest.TestCase):
-    def test_unchanged_state_avoids_subprocess(self) -> None:
+    def test_unchanged_state_avoids_mutation(self) -> None:
+        proxy = mock.Mock()
         with (
             mock.patch.object(POWER_TOGGLE, "extension_is_enabled", return_value=True),
-            mock.patch.object(POWER_TOGGLE.subprocess, "run") as run,
+            mock.patch.object(
+                POWER_TOGGLE,
+                "gnome_shell_extensions_proxy",
+                return_value=proxy,
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "extension_info",
+                return_value={"enabled": True, "state": 1, "error": ""},
+            ),
+            mock.patch.object(POWER_TOGGLE, "request_extension_enabled") as request,
         ):
             self.assertTrue(POWER_TOGGLE.set_extension_enabled(True))
 
-        run.assert_not_called()
+        request.assert_not_called()
 
     def test_failed_enable_is_retryable_failure(self) -> None:
-        result = mock.Mock(returncode=1, stderr="Extension not found", stdout="")
+        proxy = mock.Mock()
         with (
             mock.patch.object(POWER_TOGGLE, "extension_is_enabled", return_value=False),
-            mock.patch.object(POWER_TOGGLE.subprocess, "run", return_value=result),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "gnome_shell_extensions_proxy",
+                return_value=proxy,
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "extension_info",
+                return_value={"enabled": False, "state": 2, "error": ""},
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "request_extension_enabled",
+                return_value=False,
+            ),
             self.assertLogs("power-toggle", level="ERROR"),
         ):
             self.assertFalse(POWER_TOGGLE.set_extension_enabled(True))
+
+    def test_runtime_active_with_disabled_setting_resets_manager(self) -> None:
+        proxy = mock.Mock()
+        with (
+            mock.patch.object(POWER_TOGGLE, "extension_is_enabled", return_value=False),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "gnome_shell_extensions_proxy",
+                return_value=proxy,
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "extension_info",
+                return_value={"enabled": False, "state": 1, "error": ""},
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "request_extension_enabled",
+                return_value=True,
+            ) as request,
+            mock.patch.object(
+                POWER_TOGGLE,
+                "wait_for_extension_state",
+                side_effect=(False, True),
+            ) as wait,
+            mock.patch.object(
+                POWER_TOGGLE,
+                "wait_for_extension_configuration",
+                return_value=True,
+            ) as wait_configuration,
+            self.assertLogs("power-toggle", level="WARNING"),
+        ):
+            self.assertTrue(POWER_TOGGLE.set_extension_enabled(False))
+
+        self.assertEqual(
+            request.call_args_list,
+            [mock.call(proxy, True), mock.call(proxy, False)],
+        )
+        self.assertEqual(
+            wait.call_args_list,
+            [
+                mock.call(proxy, False, log_failure=False),
+                mock.call(proxy, False),
+            ],
+        )
+        wait_configuration.assert_called_once_with(proxy, True)
+
+
+class ExtensionRuntimeTests(unittest.TestCase):
+    def test_reads_shell_runtime_state(self) -> None:
+        result = mock.Mock()
+        result.unpack.return_value = (
+            {
+                "uuid": POWER_TOGGLE.EXTENSION_UUID,
+                "enabled": False,
+                "state": 2.0,
+                "error": "",
+            },
+        )
+        proxy = mock.Mock()
+        proxy.call_sync.return_value = result
+
+        self.assertEqual(
+            POWER_TOGGLE.extension_info(proxy),
+            {"enabled": False, "state": 2, "error": ""},
+        )
+        self.assertEqual(proxy.call_sync.call_args.args[0], "GetExtensionInfo")
+
+    def test_rejects_invalid_shell_runtime_state(self) -> None:
+        result = mock.Mock()
+        result.unpack.return_value = (
+            {
+                "uuid": POWER_TOGGLE.EXTENSION_UUID,
+                "enabled": False,
+                "state": True,
+                "error": "",
+            },
+        )
+        proxy = mock.Mock()
+        proxy.call_sync.return_value = result
+
+        with self.assertRaisesRegex(RuntimeError, "invalid extension state"):
+            POWER_TOGGLE.extension_info(proxy)
+
+    def test_battery_reconcile_only_for_enabled_or_active_state(self) -> None:
+        cases = (
+            (False, False, 2, False),
+            (True, False, 2, True),
+            (False, True, 2, True),
+            (False, False, 1, True),
+            (False, False, 7, False),
+        )
+        for configured, manager_enabled, runtime_state, expected in cases:
+            with (
+                self.subTest(
+                    configured=configured,
+                    manager_enabled=manager_enabled,
+                    runtime_state=runtime_state,
+                ),
+                mock.patch.object(
+                    POWER_TOGGLE,
+                    "extension_is_enabled",
+                    return_value=configured,
+                ),
+                mock.patch.object(
+                    POWER_TOGGLE,
+                    "extension_info",
+                    return_value={
+                        "enabled": manager_enabled,
+                        "state": runtime_state,
+                        "error": "",
+                    },
+                ),
+            ):
+                self.assertEqual(
+                    POWER_TOGGLE.extension_needs_battery_reconcile(mock.Mock()),
+                    expected,
+                )
+
+
+class MonitorTests(unittest.TestCase):
+    def test_target_extension_state_change_forces_reconciliation(self) -> None:
+        monitor_lock = mock.Mock()
+        power_proxy = mock.Mock()
+        extension_proxy = mock.Mock()
+        loop = mock.Mock()
+        with (
+            mock.patch.object(
+                POWER_TOGGLE,
+                "acquire_monitor_lock",
+                return_value=monitor_lock,
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "upower_proxy",
+                return_value=power_proxy,
+            ),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "gnome_shell_extensions_proxy",
+                return_value=extension_proxy,
+            ),
+            mock.patch.object(POWER_TOGGLE.GLib, "MainLoop", return_value=loop),
+            mock.patch.object(POWER_TOGGLE, "on_battery", return_value=True),
+            mock.patch.object(
+                POWER_TOGGLE,
+                "apply_current_power_state",
+                return_value=True,
+            ) as apply,
+            mock.patch.object(
+                POWER_TOGGLE,
+                "extension_needs_battery_reconcile",
+                side_effect=(False, True),
+            ) as needs_reconcile,
+            mock.patch.object(POWER_TOGGLE.GLibUnix, "signal_add"),
+        ):
+            self.assertEqual(POWER_TOGGLE.monitor(), 0)
+            signal_callbacks = [
+                call.args[1]
+                for call in extension_proxy.connect.call_args_list
+                if call.args[0] == "g-signal"
+            ]
+            self.assertEqual(len(signal_callbacks), 1)
+
+            apply.reset_mock()
+            parameters = mock.Mock()
+            parameters.unpack.return_value = ("another-extension@example.com", {})
+            signal_callbacks[0](
+                extension_proxy,
+                None,
+                "ExtensionStateChanged",
+                parameters,
+            )
+            apply.assert_not_called()
+
+            parameters.unpack.return_value = (POWER_TOGGLE.EXTENSION_UUID, {})
+            signal_callbacks[0](
+                extension_proxy,
+                None,
+                "ExtensionStateChanged",
+                parameters,
+            )
+            apply.assert_not_called()
+            signal_callbacks[0](
+                extension_proxy,
+                None,
+                "ExtensionStateChanged",
+                parameters,
+            )
+            apply.assert_called_once_with(power_proxy)
+            self.assertEqual(needs_reconcile.call_count, 2)
 
 
 class KeyboardBacklightMutationTests(unittest.TestCase):

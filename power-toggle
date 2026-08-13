@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,23 @@ from gi.repository import Gio, GLib, GLibUnix  # noqa: E402
 
 EXTENSION_UUID = "system-monitor-next@paradoxxx.zero.gmail.com"
 GNOME_EXTENSIONS = "/usr/bin/gnome-extensions"
+GNOME_SHELL_NAME = "org.gnome.Shell"
+GNOME_SHELL_PATH = "/org/gnome/Shell"
+GNOME_SHELL_EXTENSIONS_INTERFACE = "org.gnome.Shell.Extensions"
+EXTENSION_STATE_ACTIVE = 1
+EXTENSION_STATE_DEACTIVATING = 7
+EXTENSION_STATE_NAMES = {
+    1: "active",
+    2: "inactive",
+    3: "error",
+    4: "out of date",
+    5: "downloading",
+    6: "initialized",
+    7: "deactivating",
+    99: "uninstalled",
+}
+EXTENSION_TRANSITION_SECONDS = 3.0
+EXTENSION_POLL_SECONDS = 0.05
 
 UPOWER_NAME = "org.freedesktop.UPower"
 UPOWER_PATH = "/org/freedesktop/UPower"
@@ -54,6 +72,18 @@ def interface_settings() -> Gio.Settings:
     return Gio.Settings.new("org.gnome.desktop.interface")
 
 
+def gnome_shell_extensions_proxy() -> Gio.DBusProxy:
+    return Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SESSION,
+        Gio.DBusProxyFlags.NONE,
+        None,
+        GNOME_SHELL_NAME,
+        GNOME_SHELL_PATH,
+        GNOME_SHELL_EXTENSIONS_INTERFACE,
+        None,
+    )
+
+
 def extension_is_enabled() -> bool:
     enabled = gnome_shell_settings().get_strv("enabled-extensions")
     return EXTENSION_UUID in enabled
@@ -69,25 +99,171 @@ def extension_is_installed() -> bool:
     return result.returncode == 0
 
 
-def set_extension_enabled(enabled: bool) -> bool:
-    if extension_is_enabled() == enabled:
-        return True
-
-    action = "enable" if enabled else "disable"
-    result = subprocess.run(
-        [GNOME_EXTENSIONS, action, EXTENSION_UUID],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
+def extension_info(proxy: Gio.DBusProxy) -> dict[str, Any]:
+    result = proxy.call_sync(
+        "GetExtensionInfo",
+        GLib.Variant("(s)", (EXTENSION_UUID,)),
+        Gio.DBusCallFlags.NONE,
+        -1,
+        None,
     )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-        LOG.error("Could not %s %s: %s", action, EXTENSION_UUID, detail)
-        return False
+    if result is None:
+        raise RuntimeError("GNOME Shell returned no extension information")
 
-    if extension_is_enabled() != enabled:
-        LOG.error("GNOME did not retain the requested extension state")
+    values = result.unpack()
+    info = values[0] if len(values) == 1 else None
+    if not isinstance(info, dict) or info.get("uuid") != EXTENSION_UUID:
+        raise RuntimeError("GNOME Shell returned invalid extension information")
+
+    enabled = info.get("enabled")
+    if not isinstance(enabled, bool):
+        raise RuntimeError("GNOME Shell returned an invalid enabled state")
+
+    state = info.get("state")
+    if (
+        isinstance(state, bool)
+        or not isinstance(state, (int, float))
+        or not float(state).is_integer()
+        or state < 0
+    ):
+        raise RuntimeError("GNOME Shell returned an invalid extension state")
+
+    error = info.get("error", "")
+    if not isinstance(error, str):
+        raise RuntimeError("GNOME Shell returned an invalid extension error")
+    return {"enabled": enabled, "state": int(state), "error": error}
+
+
+def extension_runtime_matches(info: dict[str, Any], enabled: bool) -> bool:
+    if info["enabled"] != enabled:
+        return False
+    if enabled:
+        return info["state"] == EXTENSION_STATE_ACTIVE
+    return info["state"] not in (
+        EXTENSION_STATE_ACTIVE,
+        EXTENSION_STATE_DEACTIVATING,
+    )
+
+
+def extension_needs_battery_reconcile(proxy: Gio.DBusProxy) -> bool:
+    try:
+        info = extension_info(proxy)
+    except (GLib.Error, RuntimeError):
+        return True
+    return (
+        extension_is_enabled()
+        or info["enabled"]
+        or info["state"] == EXTENSION_STATE_ACTIVE
+    )
+
+
+def request_extension_enabled(proxy: Gio.DBusProxy, enabled: bool) -> bool:
+    method = "EnableExtension" if enabled else "DisableExtension"
+    result = proxy.call_sync(
+        method,
+        GLib.Variant("(s)", (EXTENSION_UUID,)),
+        Gio.DBusCallFlags.NONE,
+        -1,
+        None,
+    )
+    if result is None:
+        raise RuntimeError(f"GNOME Shell returned no {method} result")
+
+    values = result.unpack()
+    if (
+        len(values) != 1
+        or not isinstance(values[0], bool)
+    ):
+        raise RuntimeError(f"GNOME Shell returned an invalid {method} result")
+    return values[0]
+
+
+def wait_for_extension_configuration(
+    proxy: Gio.DBusProxy, enabled: bool
+) -> bool:
+    return wait_for_extension_state(proxy, enabled, require_runtime=False)
+
+
+def wait_for_extension_state(
+    proxy: Gio.DBusProxy,
+    enabled: bool,
+    *,
+    require_runtime: bool = True,
+    log_failure: bool = True,
+) -> bool:
+    deadline = time.monotonic() + EXTENSION_TRANSITION_SECONDS
+    last_info: dict[str, Any] | None = None
+    last_error: GLib.Error | RuntimeError | None = None
+    while True:
+        try:
+            last_info = extension_info(proxy)
+            last_error = None
+            configured = extension_is_enabled()
+            manager_matches = last_info["enabled"] == enabled
+            runtime_matches = (
+                extension_runtime_matches(last_info, enabled)
+                if require_runtime
+                else True
+            )
+            if configured == enabled and manager_matches and runtime_matches:
+                return True
+        except (GLib.Error, RuntimeError) as error:
+            last_error = error
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(EXTENSION_POLL_SECONDS, remaining))
+
+    if log_failure:
+        target = "enabled" if enabled else "disabled"
+        detail = str(last_error) if last_error else repr(last_info)
+        LOG.error(
+            "GNOME Shell did not settle %s as %s: %s",
+            EXTENSION_UUID,
+            target,
+            detail,
+        )
+    return False
+
+
+def set_extension_enabled(enabled: bool) -> bool:
+    action = "enable" if enabled else "disable"
+    try:
+        proxy = gnome_shell_extensions_proxy()
+        info = extension_info(proxy)
+        configured = extension_is_enabled()
+        if configured == enabled and extension_runtime_matches(info, enabled):
+            return True
+
+        # Shell can apply a stale startup snapshot after the setting changed.
+        # A processed opposite state gives its async manager a fresh edge.
+        if info["enabled"] == enabled:
+            if wait_for_extension_state(
+                proxy, enabled, log_failure=False
+            ):
+                return True
+            LOG.warning(
+                "Resetting stale GNOME Shell runtime state for %s",
+                EXTENSION_UUID,
+            )
+            if not request_extension_enabled(proxy, not enabled):
+                LOG.error(
+                    "Could not reset %s before trying to %s it",
+                    EXTENSION_UUID,
+                    action,
+                )
+                return False
+            if not wait_for_extension_configuration(proxy, not enabled):
+                return False
+
+        if not request_extension_enabled(proxy, enabled):
+            LOG.error("Could not %s %s", action, EXTENSION_UUID)
+            return False
+        if not wait_for_extension_state(proxy, enabled):
+            return False
+    except (GLib.Error, RuntimeError) as error:
+        LOG.error("Could not %s %s: %s", action, EXTENSION_UUID, error)
         return False
 
     LOG.info("%sd %s", action.capitalize(), EXTENSION_UUID)
@@ -558,6 +734,12 @@ def monitor() -> int:
         LOG.error("Cannot connect to UPower: %s", error.message)
         monitor_lock.close()
         return 1
+    try:
+        extension_proxy = gnome_shell_extensions_proxy()
+    except GLib.Error as error:
+        LOG.error("Cannot connect to GNOME Shell: %s", error.message)
+        monitor_lock.close()
+        return 1
 
     loop = GLib.MainLoop()
     last_power_state: bool | None = None
@@ -615,17 +797,44 @@ def monitor() -> int:
         if proxy.get_name_owner() is not None:
             reconcile(force=True)
 
+    def extension_state_changed(
+        _proxy: Gio.DBusProxy,
+        _sender_name: str | None,
+        signal_name: str,
+        parameters: GLib.Variant,
+    ) -> None:
+        if signal_name != "ExtensionStateChanged":
+            return
+        values = parameters.unpack()
+        if not values or values[0] != EXTENSION_UUID:
+            return
+        try:
+            using_battery = on_battery(proxy)
+        except RuntimeError:
+            reconcile(force=True)
+            return
+        if using_battery and extension_needs_battery_reconcile(extension_proxy):
+            reconcile(force=True)
+
+    def extension_name_owner_changed(
+        _proxy: Gio.DBusProxy, _parameter: Any
+    ) -> None:
+        if extension_proxy.get_name_owner() is not None:
+            reconcile(force=True)
+
     def stop_loop() -> GLib.SOURCE_REMOVE:
         loop.quit()
         return GLib.SOURCE_REMOVE
 
     proxy.connect("g-properties-changed", properties_changed)
     proxy.connect("notify::g-name-owner", name_owner_changed)
+    extension_proxy.connect("g-signal", extension_state_changed)
+    extension_proxy.connect("notify::g-name-owner", extension_name_owner_changed)
     GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop_loop)
     GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop_loop)
 
     reconcile(force=True)
-    LOG.info("Watching UPower for power-source changes")
+    LOG.info("Watching UPower and GNOME Shell state changes")
     loop.run()
     monitor_lock.close()
     return 0
@@ -639,7 +848,15 @@ def print_status() -> int:
         power_source = f"unknown ({error})"
 
     if extension_is_installed():
-        extension_state = "enabled" if extension_is_enabled() else "disabled"
+        configured_state = "enabled" if extension_is_enabled() else "disabled"
+        try:
+            runtime_info = extension_info(gnome_shell_extensions_proxy())
+            runtime_state = EXTENSION_STATE_NAMES.get(
+                runtime_info["state"], str(runtime_info["state"])
+            )
+        except (GLib.Error, RuntimeError) as error:
+            runtime_state = f"unavailable ({error})"
+        extension_state = f"{configured_state}; runtime {runtime_state}"
     else:
         extension_state = "not installed"
 
