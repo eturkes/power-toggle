@@ -15,4 +15,4 @@ user_unit_dir=${XDG_CONFIG_HOME:-"${HOME}/.config"}/systemd/user
 /usr/bin/systemctl --user restart power-toggle.service
 
 printf 'Installed and started power-toggle.service\n'
-printf 'Check it with: systemctl --user status power-toggle.service\n'
+printf 'Check the service: systemctl --user status power-toggle.service\n'

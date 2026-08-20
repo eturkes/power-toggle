@@ -1,24 +1,23 @@
 # Power Toggle
 
-`power-toggle` watches UPower and adjusts desktop state when the power source
+`power-toggle` watches UPower and changes desktop settings when the power source
 changes:
 
-- On battery: disable `system-monitor-next@paradoxxx.zero.gmail.com` and hide
-  seconds in the GNOME clock, then turn off every keyboard backlight reported
-  by UPower and synchronize GNOME's keyboard quick-setting button.
-- On external power: restore all managed values to exactly how they were before
-  the switch to battery, including the quick-setting state.
+- On battery power, it disables `system-monitor-next@paradoxxx.zero.gmail.com`
+  and hides seconds in the GNOME clock. It turns off every keyboard backlight
+  that UPower reports. It also synchronizes the GNOME keyboard-backlight quick
+  setting.
+- On external power, it restores every managed value to its exact pre-battery
+  state. This restoration includes the GNOME keyboard-backlight quick setting.
 
-The pre-battery values are saved under
-`~/.local/state/power-toggle/` (or `$XDG_STATE_HOME/power-toggle/`). This means a
-logout, reboot, or watcher restart while on battery does not overwrite the
-values that need to be restored.
+`power-toggle` stores the pre-battery values under
+`~/.local/state/power-toggle/` (or `$XDG_STATE_HOME/power-toggle/`). A logout,
+reboot, or watcher restart on battery power does not replace these values.
 
-The watcher is event-driven: it sleeps until UPower reports a power-source
-change or GNOME Shell reports a managed extension-state change. Watching the
-runtime state makes a late extension activation during Shell startup
-self-correcting. A 30-second timer is created only after an action fails, then
-removed after a successful retry.
+The watcher responds to UPower power-source changes and managed GNOME Shell
+extension-state changes. It corrects an extension that activates late during
+GNOME Shell startup. It creates a 30-second timer only after an action fails.
+It removes the timer after a successful retry.
 
 ## Requirements
 
@@ -29,18 +28,19 @@ removed after a successful retry.
 
 ## Try it
 
-Show the current source and managed settings without changing anything:
+Display the current power source and managed settings without changing the
+desktop:
 
 ```sh
 ./power-toggle status
 ```
 
-The status distinguishes the extension's configured and live runtime states.
-It also includes each UPower hardware level and GNOME's cached keyboard menu
-percentage, making configuration/runtime and desktop/hardware mismatches
-visible.
+The output separates the configured extension state from the live runtime
+state. It also shows each UPower hardware level and the cached percentage for
+the GNOME keyboard-backlight quick setting. These values expose configuration,
+runtime, desktop, and hardware mismatches.
 
-Apply the policy once and exit:
+Apply the policy one time:
 
 ```sh
 ./power-toggle once
@@ -65,21 +65,23 @@ restore the saved settings with:
 ./install.sh
 ```
 
-Inspect its logs with:
+Inspect the service logs:
 
 ```sh
 journalctl --user -u power-toggle.service
 ```
 
-Remove the service and restore any saved pre-battery state with:
+Run the uninstall script:
 
 ```sh
 ./uninstall.sh
 ```
 
+The script removes the service and restores any saved pre-battery state.
+
 ## Development
 
-Run the isolated state-machine tests and shell syntax checks:
+Run the development checks:
 
 ```sh
 /usr/bin/python3 -m unittest discover -s tests -v

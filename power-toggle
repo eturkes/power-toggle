@@ -891,8 +891,11 @@ def print_status() -> int:
     print(f"Power source: {power_source}")
     print(f"Extension:    {extension_state} ({EXTENSION_UUID})")
     print(f"Clock seconds: {'on' if seconds_are_enabled() else 'off'}")
-    print(f"Keyboard backlight: {backlight_description}")
-    print(f"GNOME keyboard menu: {gnome_backlight_description}")
+    print(f"Keyboard backlights: {backlight_description}")
+    print(
+        "GNOME keyboard-backlight quick setting: "
+        f"{gnome_backlight_description}"
+    )
     print(f"Saved state:  {saved_description}")
     return 0
 
@@ -910,7 +913,7 @@ def parse_arguments() -> argparse.Namespace:
         choices=("monitor", "once", "restore", "status"),
         nargs="?",
         default="monitor",
-        help="operation to perform (default: monitor)",
+        help="command to run (default: monitor)",
     )
     return parser.parse_args()
 
