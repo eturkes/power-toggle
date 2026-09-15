@@ -7,8 +7,9 @@ changes:
   and hides seconds in the GNOME clock. It turns off every keyboard backlight
   that UPower reports. It also synchronizes the GNOME keyboard-backlight quick
   setting.
-- On external power, it restores every managed value to its exact pre-battery
-  state. This restoration includes the GNOME keyboard-backlight quick setting.
+- On external power, it restores the saved extension setting, clock setting,
+  and keyboard backlight levels. It sets the GNOME keyboard-backlight quick
+  setting to the percentage derived from the saved hardware level.
 
 `power-toggle` stores the pre-battery values under
 `~/.local/state/power-toggle/` (or `$XDG_STATE_HOME/power-toggle/`). A logout,
