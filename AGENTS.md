@@ -67,15 +67,17 @@
   percentage. Set `org.gnome.SettingsDaemon.Power.Keyboard.Brightness` first,
   even when its cache matches, for Shell's `PropertiesChanged`; apply exact
   native levels last. [GSD](https://raw.githubusercontent.com/GNOME/gnome-settings-daemon/master/plugins/power/gsd-power-manager.c)
-  ignores UPower changes sourced `external`.
+  ignores UPower changes sourced `external`. Closed lid → defer keyboard writes;
+  preserve the baseline until restoration completes. Desktop changes continue.
 - Extension = verify configured + live Shell state through `GetExtensionInfo`;
   configured disabled can coexist with runtime active during startup. Preserve stale-manager
   recovery + managed `ExtensionStateChanged` reconciliation; filter settled
   lifecycle signals to avoid feedback.
-- Monitor = signal-driven steady state (`OnBattery`, managed extension events,
+- Monitor = signal-driven steady state (`OnBattery`, `LidIsClosed`, managed extension events,
   bus-name ownership); retry timer only after failure. Bounded transition
-  polling belongs to extension settling. Failed policy → invalidate last-success
-  cache; retries + power-source reversals must reconcile partial mutations.
+  polling belongs to extension settling. Outcomes = complete | lid-deferred | failed.
+  Complete/deferred → cache handled power state; lid changes force reconciliation.
+  Failed → invalidate cache + retry, even with a deferred keyboard change.
 
 ## Verification
 

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,12 @@ STATE_FILE = STATE_DIR / "pre-battery-state.json"
 LOCK_FILE = STATE_DIR / "monitor.lock"
 
 LOG = logging.getLogger("power-toggle")
+
+
+class PolicyResult(Enum):
+    COMPLETE = auto()
+    DEFERRED = auto()
+    FAILED = auto()
 
 
 def gnome_shell_settings() -> Gio.Settings:
@@ -522,6 +529,29 @@ def set_keyboard_backlights(
     return success
 
 
+def apply_keyboard_policy(
+    brightnesses: dict[str, int],
+    percentage: int | None,
+    proxy: Gio.DBusProxy | None = None,
+) -> PolicyResult:
+    if not brightnesses and percentage is None:
+        return PolicyResult.COMPLETE
+    try:
+        if proxy is None:
+            proxy = upower_proxy()
+        # Closed-lid firmware can acknowledge writes while retaining the old level.
+        if lid_is_closed(proxy):
+            LOG.info("Deferring keyboard backlight changes until the lid opens")
+            return PolicyResult.DEFERRED
+        if percentage is None:
+            percentage = keyboard_backlight_percentage(brightnesses)
+        success = set_keyboard_backlights(brightnesses, percentage)
+    except (GLib.Error, RuntimeError) as error:
+        LOG.error("Cannot apply the keyboard backlight policy: %s", error)
+        return PolicyResult.FAILED
+    return PolicyResult.COMPLETE if success else PolicyResult.FAILED
+
+
 def state_snapshot() -> dict[str, Any]:
     backlights = keyboard_backlight_brightnesses()
     return {
@@ -598,12 +628,12 @@ def save_state(state: dict[str, Any]) -> None:
         raise
 
 
-def apply_battery_policy() -> bool:
+def apply_battery_policy(proxy: Gio.DBusProxy | None = None) -> PolicyResult:
     try:
         saved_state = load_saved_state()
     except (OSError, ValueError) as error:
         LOG.error("Cannot read %s: %s", STATE_FILE, error)
-        return False
+        return PolicyResult.FAILED
 
     if saved_state is None:
         try:
@@ -611,7 +641,7 @@ def apply_battery_policy() -> bool:
             save_state(saved_state)
         except (GLib.Error, OSError, RuntimeError) as error:
             LOG.error("Cannot capture the pre-battery state: %s", error)
-            return False
+            return PolicyResult.FAILED
         LOG.info("Saved the pre-battery state")
     elif saved_state["version"] in (1, 2):
         try:
@@ -631,50 +661,44 @@ def apply_battery_policy() -> bool:
             save_state(saved_state)
         except (GLib.Error, OSError, RuntimeError) as error:
             LOG.error("Cannot update the saved keyboard backlight state: %s", error)
-            return False
+            return PolicyResult.FAILED
         LOG.info("Updated the saved pre-battery keyboard backlight state")
 
     extension_ok = set_extension_enabled(False)
     seconds_ok = set_seconds_enabled(False)
     backlights = saved_state["keyboard_backlights"]
-    backlight_ok = set_keyboard_backlights(
-        {path: 0 for path in backlights}, 0 if backlights else None
+    backlight_result = apply_keyboard_policy(
+        {path: 0 for path in backlights}, 0 if backlights else None, proxy
     )
-    return extension_ok and seconds_ok and backlight_ok
+    if not (extension_ok and seconds_ok):
+        return PolicyResult.FAILED
+    return backlight_result
 
 
-def restore_pre_battery_state() -> bool:
+def restore_pre_battery_state(proxy: Gio.DBusProxy | None = None) -> PolicyResult:
     try:
         saved_state = load_saved_state()
     except (OSError, ValueError) as error:
         LOG.error("Cannot read %s: %s", STATE_FILE, error)
-        return False
+        return PolicyResult.FAILED
 
     if saved_state is None:
-        return True
-
-    backlight_percentage = None
-    if saved_state["version"] == 2:
-        try:
-            backlight_percentage = keyboard_backlight_percentage(
-                saved_state["keyboard_backlights"]
-            )
-        except (GLib.Error, RuntimeError) as error:
-            LOG.error("Cannot restore the GNOME keyboard backlight state: %s", error)
-            return False
-    elif saved_state["version"] == 3:
-        backlight_percentage = saved_state["keyboard_backlight_percentage"]
+        return PolicyResult.COMPLETE
 
     extension_ok = set_extension_enabled(saved_state["extension_enabled"])
     seconds_ok = set_seconds_enabled(saved_state["clock_show_seconds"])
-    backlight_ok = True
+    backlight_result = PolicyResult.COMPLETE
     if saved_state["version"] in (2, 3):
-        backlight_ok = set_keyboard_backlights(
-            saved_state["keyboard_backlights"], backlight_percentage
+        backlight_result = apply_keyboard_policy(
+            saved_state["keyboard_backlights"],
+            saved_state.get("keyboard_backlight_percentage"),
+            proxy,
         )
-    if not (extension_ok and seconds_ok and backlight_ok):
+    if not (extension_ok and seconds_ok) or backlight_result is PolicyResult.FAILED:
         LOG.error("Keeping saved state so restoration can be retried")
-        return False
+        return PolicyResult.FAILED
+    if backlight_result is PolicyResult.DEFERRED:
+        return PolicyResult.DEFERRED
 
     try:
         STATE_FILE.unlink()
@@ -684,10 +708,10 @@ def restore_pre_battery_state() -> bool:
         LOG.error(
             "State was restored, but %s could not be removed: %s", STATE_FILE, error
         )
-        return False
+        return PolicyResult.FAILED
 
     LOG.info("Restored the pre-battery state")
-    return True
+    return PolicyResult.COMPLETE
 
 
 def on_battery(proxy: Gio.DBusProxy) -> bool:
@@ -697,17 +721,24 @@ def on_battery(proxy: Gio.DBusProxy) -> bool:
     return value.get_boolean()
 
 
-def apply_current_power_state(proxy: Gio.DBusProxy) -> bool:
+def lid_is_closed(proxy: Gio.DBusProxy) -> bool:
+    value = proxy.get_cached_property("LidIsClosed")
+    if value is None:
+        raise RuntimeError("UPower did not provide its LidIsClosed property")
+    return value.get_boolean()
+
+
+def apply_current_power_state(proxy: Gio.DBusProxy) -> PolicyResult:
     try:
         using_battery = on_battery(proxy)
     except RuntimeError as error:
         LOG.error("Cannot determine the current power source: %s", error)
-        return False
+        return PolicyResult.FAILED
 
     LOG.info("Power source: %s", "battery" if using_battery else "external power")
     if using_battery:
-        return apply_battery_policy()
-    return restore_pre_battery_state()
+        return apply_battery_policy(proxy)
+    return restore_pre_battery_state(proxy)
 
 
 def acquire_monitor_lock() -> Any:
@@ -742,7 +773,7 @@ def monitor() -> int:
         return 1
 
     loop = GLib.MainLoop()
-    last_power_state: bool | None = None
+    last_handled_power_state: bool | None = None
     retry_source: int | None = None
 
     def cancel_retry() -> None:
@@ -764,22 +795,23 @@ def monitor() -> int:
             retry_source = GLib.timeout_add_seconds(RETRY_SECONDS, retry)
 
     def reconcile(force: bool = False) -> None:
-        nonlocal last_power_state
+        nonlocal last_handled_power_state
         try:
             current_power_state = on_battery(proxy)
         except RuntimeError as error:
             LOG.warning("Waiting for UPower: %s", error)
             schedule_retry()
             return
-        if not force and current_power_state == last_power_state:
+        if not force and current_power_state == last_handled_power_state:
             cancel_retry()
             return
-        if apply_current_power_state(proxy):
-            last_power_state = current_power_state
+        if apply_current_power_state(proxy) is not PolicyResult.FAILED:
+            # Lid changes force replay of a deferred result without a retry timer.
+            last_handled_power_state = current_power_state
             cancel_retry()
         else:
-            # Partial mutations invalidate the previous successful state.
-            last_power_state = None
+            # Partial failures invalidate prior policy results.
+            last_handled_power_state = None
             schedule_retry()
 
     def properties_changed(
@@ -787,15 +819,15 @@ def monitor() -> int:
         changed_properties: GLib.Variant,
         invalidated_properties: list[str],
     ) -> None:
-        if (
-            "OnBattery" in changed_properties.keys()
-            or "OnBattery" in invalidated_properties
-        ):
+        changed = set(changed_properties.keys()) | set(invalidated_properties)
+        if "LidIsClosed" in changed:
+            reconcile(force=True)
+        elif "OnBattery" in changed:
             reconcile()
 
     def name_owner_changed(_proxy: Gio.DBusProxy, _parameter: Any) -> None:
-        nonlocal last_power_state
-        last_power_state = None
+        nonlocal last_handled_power_state
+        last_handled_power_state = None
         if proxy.get_name_owner() is not None:
             reconcile(force=True)
 
@@ -843,11 +875,19 @@ def monitor() -> int:
 
 
 def print_status() -> int:
+    proxy = None
     try:
         proxy = upower_proxy()
         power_source = "battery" if on_battery(proxy) else "external power"
     except (GLib.Error, RuntimeError) as error:
         power_source = f"unknown ({error})"
+
+    lid_state = "unknown"
+    if proxy is not None:
+        try:
+            lid_state = "closed" if lid_is_closed(proxy) else "open"
+        except RuntimeError as error:
+            lid_state = f"unknown ({error})"
 
     if extension_is_installed():
         configured_state = "enabled" if extension_is_enabled() else "disabled"
@@ -891,6 +931,7 @@ def print_status() -> int:
         gnome_backlight_description = f"unavailable ({error})"
 
     print(f"Power source: {power_source}")
+    print(f"Lid:          {lid_state}")
     print(f"Extension:    {extension_state} ({EXTENSION_UUID})")
     print(f"Clock seconds: {'on' if seconds_are_enabled() else 'off'}")
     print(f"Keyboard backlights: {backlight_description}")
@@ -927,7 +968,7 @@ def main() -> int:
     if arguments.command == "monitor":
         return monitor()
     if arguments.command == "restore":
-        return 0 if restore_pre_battery_state() else 1
+        return 0 if restore_pre_battery_state() is PolicyResult.COMPLETE else 1
     if arguments.command == "status":
         return print_status()
 
@@ -936,7 +977,7 @@ def main() -> int:
     except GLib.Error as error:
         LOG.error("Cannot connect to UPower: %s", error.message)
         return 1
-    return 0 if apply_current_power_state(proxy) else 1
+    return 0 if apply_current_power_state(proxy) is PolicyResult.COMPLETE else 1
 
 
 if __name__ == "__main__":

@@ -15,10 +15,15 @@ changes:
 `~/.local/state/power-toggle/` (or `$XDG_STATE_HOME/power-toggle/`). A logout,
 reboot, or watcher restart on battery power does not replace these values.
 
-The watcher responds to UPower power-source changes and managed GNOME Shell
-extension-state changes. It corrects an extension that activates late during
-GNOME Shell startup. It creates a 30-second timer only after an action fails.
-It removes the timer after a successful retry.
+While the lid is closed, the watcher defers keyboard changes and keeps the
+saved baseline. Extension and clock changes continue. When the lid opens,
+the watcher applies the keyboard policy for the current power source.
+A closed lid alone does not start a retry timer.
+
+The watcher responds to UPower power-source and lid-state changes, and managed
+GNOME Shell extension-state changes. It corrects an extension that activates
+late during GNOME Shell startup. It creates a 30-second timer only after an
+action fails. It removes the timer after a successful retry.
 
 ## Requirements
 
@@ -36,10 +41,10 @@ desktop:
 ./power-toggle status
 ```
 
-The output separates the configured extension state from the live runtime
-state. It also shows each UPower hardware level and the cached percentage for
-the GNOME keyboard-backlight quick setting. These values expose configuration,
-runtime, desktop, and hardware mismatches.
+The output shows the lid state and separates the configured extension state
+from the live runtime state. It also shows each UPower hardware level and the
+cached percentage for the GNOME keyboard-backlight quick setting. These values
+expose configuration, runtime, desktop, and hardware mismatches.
 
 Apply the policy one time:
 
@@ -59,6 +64,9 @@ restore the saved settings with:
 ```sh
 ./power-toggle restore
 ```
+
+If `once` or `restore` defers a keyboard change, it exits with status 1.
+Open the lid and run the command again.
 
 ## Run automatically after login
 

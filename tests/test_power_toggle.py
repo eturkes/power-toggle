@@ -41,7 +41,13 @@ class DesktopTestCase(unittest.TestCase):
         )
         self.keyboard_backlights = {self.keyboard_path: 2}
         self.gnome_keyboard_percentage = 100
+        self.power_properties: dict[str, bool | None] = {
+            "OnBattery": False, "LidIsClosed": False
+        }
+        self.power_proxy = mock.Mock()
+        self.power_proxy.get_cached_property.side_effect = self.power_property
         self.behavior_patches = (
+            mock.patch.object(POWER_TOGGLE, "upower_proxy", return_value=self.power_proxy),
             mock.patch.object(
                 POWER_TOGGLE,
                 "extension_is_enabled",
@@ -86,6 +92,10 @@ class DesktopTestCase(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def power_property(self, name: str):
+        value = self.power_properties.get(name)
+        return None if value is None else POWER_TOGGLE.GLib.Variant("b", value)
+
     def set_extension(self, enabled: bool) -> bool:
         self.desktop["extension"] = enabled
         return True
@@ -104,7 +114,7 @@ class DesktopTestCase(unittest.TestCase):
 
 class PolicyStateTests(DesktopTestCase):
     def test_battery_restart_preserves_baseline_then_restores(self) -> None:
-        self.assertTrue(POWER_TOGGLE.apply_battery_policy())
+        self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.COMPLETE)
         self.assertEqual(self.desktop, {"extension": False, "seconds": False})
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
         self.assertEqual(self.gnome_keyboard_percentage, 0)
@@ -120,10 +130,10 @@ class PolicyStateTests(DesktopTestCase):
             },
         )
 
-        self.assertTrue(POWER_TOGGLE.apply_battery_policy())
+        self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.COMPLETE)
         self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
 
-        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+        self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE)
         self.assertEqual(self.desktop, {"extension": True, "seconds": True})
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
         self.assertEqual(self.gnome_keyboard_percentage, 100)
@@ -133,12 +143,12 @@ class PolicyStateTests(DesktopTestCase):
         self.desktop = {"extension": False, "seconds": False}
         self.keyboard_backlights[self.keyboard_path] = 0
         self.gnome_keyboard_percentage = 0
-        self.assertTrue(POWER_TOGGLE.apply_battery_policy())
+        self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.COMPLETE)
 
         self.desktop = {"extension": True, "seconds": True}
         self.keyboard_backlights[self.keyboard_path] = 2
         self.gnome_keyboard_percentage = 100
-        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+        self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE)
 
         self.assertEqual(self.desktop, {"extension": False, "seconds": False})
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
@@ -149,7 +159,7 @@ class PolicyStateTests(DesktopTestCase):
         self.state_file.write_text('{"version": 99}\n', encoding="utf-8")
 
         with self.assertLogs("power-toggle", level="ERROR"):
-            self.assertFalse(POWER_TOGGLE.apply_battery_policy())
+            self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.FAILED)
 
         self.assertEqual(self.desktop, {"extension": True, "seconds": True})
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
@@ -167,7 +177,7 @@ class PolicyStateTests(DesktopTestCase):
         POWER_TOGGLE.set_extension_enabled.side_effect = lambda _enabled: False
 
         with self.assertLogs("power-toggle", level="ERROR"):
-            self.assertFalse(POWER_TOGGLE.restore_pre_battery_state())
+            self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.FAILED)
 
         self.assertTrue(self.state_file.exists())
 
@@ -193,7 +203,7 @@ class PolicyStateTests(DesktopTestCase):
             }
         )
 
-        self.assertTrue(POWER_TOGGLE.apply_battery_policy())
+        self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.COMPLETE)
         self.assertEqual(
             POWER_TOGGLE.load_saved_state(),
             {
@@ -207,7 +217,7 @@ class PolicyStateTests(DesktopTestCase):
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
         self.assertEqual(self.gnome_keyboard_percentage, 0)
 
-        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+        self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE)
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
         self.assertEqual(self.gnome_keyboard_percentage, 100)
 
@@ -223,7 +233,7 @@ class PolicyStateTests(DesktopTestCase):
         self.keyboard_backlights[self.keyboard_path] = 0
         self.gnome_keyboard_percentage = 0
 
-        self.assertTrue(POWER_TOGGLE.apply_battery_policy())
+        self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.COMPLETE)
         self.assertEqual(
             POWER_TOGGLE.load_saved_state(),
             {
@@ -236,7 +246,7 @@ class PolicyStateTests(DesktopTestCase):
         )
         self.assertEqual(self.gnome_keyboard_percentage, 0)
 
-        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+        self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE)
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
         self.assertEqual(self.gnome_keyboard_percentage, 100)
 
@@ -252,13 +262,14 @@ class PolicyStateTests(DesktopTestCase):
         self.keyboard_backlights[self.keyboard_path] = 0
         self.gnome_keyboard_percentage = 0
 
-        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+        self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE)
 
         self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
         self.assertEqual(self.gnome_keyboard_percentage, 100)
         self.assertFalse(self.state_file.exists())
 
     def test_legacy_state_restores_without_mutating_keyboard(self) -> None:
+        self.power_properties["LidIsClosed"] = True
         POWER_TOGGLE.save_state(
             {
                 "version": 1,
@@ -267,9 +278,55 @@ class PolicyStateTests(DesktopTestCase):
             }
         )
 
-        self.assertTrue(POWER_TOGGLE.restore_pre_battery_state())
+        self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE)
 
         POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+
+    def test_closed_lid_v2_restore_defers_percentage_derivation(self) -> None:
+        baseline = {
+            "version": 2,
+            "extension_enabled": True,
+            "clock_show_seconds": True,
+            "keyboard_backlights": {self.keyboard_path: 2},
+        }
+        POWER_TOGGLE.save_state(baseline)
+        self.desktop = {"extension": False, "seconds": False}
+        self.keyboard_backlights[self.keyboard_path] = 0
+        self.gnome_keyboard_percentage = 0
+        self.power_properties["LidIsClosed"] = True
+        POWER_TOGGLE.keyboard_backlight_percentage.side_effect = RuntimeError("unavailable")
+
+        result = POWER_TOGGLE.restore_pre_battery_state()
+        self.assertEqual(self.desktop, {"extension": True, "seconds": True})
+        POWER_TOGGLE.keyboard_backlight_percentage.assert_not_called()
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertIs(result, POWER_TOGGLE.PolicyResult.DEFERRED)
+        self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+
+        self.power_properties["LidIsClosed"] = False
+        POWER_TOGGLE.keyboard_backlight_percentage.side_effect = None
+        POWER_TOGGLE.keyboard_backlight_percentage.return_value = 100
+        self.assertIs(
+            POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE
+        )
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+        self.assertEqual(self.gnome_keyboard_percentage, 100)
+        self.assertFalse(self.state_file.exists())
+
+    def test_closed_lid_empty_keyboard_restore_completes(self) -> None:
+        POWER_TOGGLE.save_state({
+            "version": 3,
+            "extension_enabled": True,
+            "clock_show_seconds": True,
+            "keyboard_backlights": {},
+            "keyboard_backlight_percentage": None,
+        })
+        self.power_properties["LidIsClosed"] = True
+        self.assertIs(
+            POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.COMPLETE
+        )
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertFalse(self.state_file.exists())
 
     def test_keyboard_snapshot_failure_blocks_all_mutation(self) -> None:
         POWER_TOGGLE.keyboard_backlight_brightnesses.side_effect = RuntimeError(
@@ -277,7 +334,7 @@ class PolicyStateTests(DesktopTestCase):
         )
 
         with self.assertLogs("power-toggle", level="ERROR"):
-            self.assertFalse(POWER_TOGGLE.apply_battery_policy())
+            self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.FAILED)
 
         POWER_TOGGLE.set_extension_enabled.assert_not_called()
         POWER_TOGGLE.set_seconds_enabled.assert_not_called()
@@ -290,7 +347,7 @@ class PolicyStateTests(DesktopTestCase):
         )
 
         with self.assertLogs("power-toggle", level="ERROR"):
-            self.assertFalse(POWER_TOGGLE.apply_battery_policy())
+            self.assertIs(POWER_TOGGLE.apply_battery_policy(), POWER_TOGGLE.PolicyResult.FAILED)
 
         POWER_TOGGLE.set_extension_enabled.assert_not_called()
         POWER_TOGGLE.set_seconds_enabled.assert_not_called()
@@ -312,7 +369,7 @@ class PolicyStateTests(DesktopTestCase):
         )
 
         with self.assertLogs("power-toggle", level="ERROR"):
-            self.assertFalse(POWER_TOGGLE.restore_pre_battery_state())
+            self.assertIs(POWER_TOGGLE.restore_pre_battery_state(), POWER_TOGGLE.PolicyResult.FAILED)
 
         self.assertTrue(self.state_file.exists())
 
@@ -528,22 +585,13 @@ class ExtensionRuntimeTests(unittest.TestCase):
 class MonitorTests(DesktopTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.power_proxy = mock.Mock()
         self.extension_proxy = mock.Mock()
-        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
-            "b", False
-        )
         self.retry_timer = mock.Mock(return_value=42)
         self.cancel_timer = mock.Mock()
         patches = (
             mock.patch.object(
                 POWER_TOGGLE,
                 "acquire_monitor_lock",
-            ),
-            mock.patch.object(
-                POWER_TOGGLE,
-                "upower_proxy",
-                return_value=self.power_proxy,
             ),
             mock.patch.object(
                 POWER_TOGGLE,
@@ -570,24 +618,148 @@ class MonitorTests(DesktopTestCase):
         self.assertEqual(len(callbacks), 1)
         callbacks[0](proxy, *args)
 
-    def power_changed(self, using_battery: bool) -> None:
-        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
-            "b", using_battery
-        )
+    def property_changed(
+        self, name: str, value: bool, *, invalidated: bool = False
+    ) -> None:
+        self.power_properties[name] = value
         self.emit(
             self.power_proxy,
             "g-properties-changed",
             POWER_TOGGLE.GLib.Variant(
-                "a{sv}", {"OnBattery": POWER_TOGGLE.GLib.Variant("b", using_battery)}
+                "a{sv}",
+                {} if invalidated else {name: POWER_TOGGLE.GLib.Variant("b", value)},
             ),
-            [],
+            [name] if invalidated else [],
         )
+
+    def power_changed(self, using_battery: bool) -> None:
+        self.property_changed("OnBattery", using_battery)
+
+    def test_closed_lid_battery_defers_keyboard_until_open(self) -> None:
+        baseline = POWER_TOGGLE.state_snapshot()
+        self.power_properties["LidIsClosed"] = True
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        self.power_changed(True)
+
+        self.assertEqual(self.desktop, {"extension": False, "seconds": False})
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+        self.retry_timer.assert_not_called()
+
+        POWER_TOGGLE.set_extension_enabled.reset_mock()
+        self.power_changed(True)
+        POWER_TOGGLE.set_extension_enabled.assert_not_called()
+
+        self.property_changed("LidIsClosed", False)
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.assertEqual(self.gnome_keyboard_percentage, 0)
+        self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+        self.retry_timer.assert_not_called()
+
+        self.power_changed(False)
+        self.assertEqual(self.desktop, {"extension": True, "seconds": True})
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+        self.assertFalse(self.state_file.exists())
+
+    def test_closed_lid_restore_survives_restart_and_lid_invalidation(self) -> None:
+        self.power_properties["OnBattery"] = True
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        baseline = self.state_file.read_bytes()
+        POWER_TOGGLE.set_keyboard_backlights.reset_mock()
+        self.property_changed("LidIsClosed", True)
+        self.power_changed(False)
+
+        self.assertEqual(self.desktop, {"extension": True, "seconds": True})
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertEqual(self.state_file.read_bytes(), baseline)
+        self.retry_timer.assert_not_called()
+
+        self.power_proxy.connect.reset_mock()
+        self.extension_proxy.connect.reset_mock()
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertEqual(self.state_file.read_bytes(), baseline)
+
+        self.property_changed("LidIsClosed", False, invalidated=True)
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+        self.assertEqual(self.gnome_keyboard_percentage, 100)
+        self.assertFalse(self.state_file.exists())
+        self.retry_timer.assert_not_called()
+
+    def test_closed_lid_power_reversals_preserve_baseline(self) -> None:
+        baseline = POWER_TOGGLE.state_snapshot()
+        self.power_properties["LidIsClosed"] = True
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        for battery in (True, False, True):
+            self.power_changed(battery)
+            self.assertEqual(
+                self.desktop, {"extension": not battery, "seconds": not battery}
+            )
+            self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+            POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+            self.retry_timer.assert_not_called()
+
+        self.power_proxy.connect.reset_mock()
+        self.extension_proxy.connect.reset_mock()
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.property_changed("LidIsClosed", False)
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+        self.retry_timer.assert_not_called()
+
+    def test_lid_close_cancels_keyboard_failure_retry(self) -> None:
+        self.power_properties["OnBattery"] = True
+        POWER_TOGGLE.set_keyboard_backlights.side_effect = lambda *_: False
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        self.retry_timer.assert_called_once()
+
+        POWER_TOGGLE.set_keyboard_backlights.reset_mock()
+        self.property_changed("LidIsClosed", True)
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.cancel_timer.assert_called_once_with(42)
+
+        POWER_TOGGLE.set_keyboard_backlights.side_effect = self.set_keyboard_backlights
+        self.property_changed("LidIsClosed", False)
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.retry_timer.assert_called_once()
+
+    def assert_closed_lid_failure_retries(self, failed_setter: str) -> None:
+        self.power_properties.update(OnBattery=True, LidIsClosed=True)
+        with mock.patch.object(POWER_TOGGLE, failed_setter, return_value=False):
+            self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertTrue(self.state_file.exists())
+        self.retry_timer.assert_called_once_with(POWER_TOGGLE.RETRY_SECONDS, mock.ANY)
+
+        retry = self.retry_timer.call_args.args[1]
+        self.assertEqual(retry(), POWER_TOGGLE.GLib.SOURCE_REMOVE)
+        self.assertEqual(self.desktop, {"extension": False, "seconds": False})
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.retry_timer.assert_called_once()
+
+    def test_closed_lid_extension_failure_keeps_retry(self) -> None:
+        self.assert_closed_lid_failure_retries("set_extension_enabled")
+
+    def test_closed_lid_clock_failure_keeps_retry(self) -> None:
+        self.assert_closed_lid_failure_retries("set_seconds_enabled")
+
+    def test_unknown_lid_keeps_retry_until_state_is_available(self) -> None:
+        self.power_properties.update(OnBattery=True, LidIsClosed=None)
+        with self.assertLogs("power-toggle", level="ERROR"):
+            self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        self.assertEqual(self.desktop, {"extension": False, "seconds": False})
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.retry_timer.assert_called_once()
+
+        self.property_changed("LidIsClosed", False, invalidated=True)
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.cancel_timer.assert_called_once_with(42)
 
     def assert_failed_transition_recovers(self, initial_battery: bool) -> None:
         baseline = POWER_TOGGLE.state_snapshot()
-        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
-            "b", initial_battery
-        )
+        self.power_properties["OnBattery"] = initial_battery
         self.assertEqual(POWER_TOGGLE.monitor(), 0)
         self.retry_timer.assert_not_called()
 
@@ -627,9 +799,7 @@ class MonitorTests(DesktopTestCase):
         self.assert_failed_transition_recovers(initial_battery=True)
 
     def test_failed_forced_reconcile_retries_unchanged_power_source(self) -> None:
-        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
-            "b", True
-        )
+        self.power_properties["OnBattery"] = True
         self.assertEqual(POWER_TOGGLE.monitor(), 0)
         baseline = POWER_TOGGLE.load_saved_state()
         self.keyboard_backlights[self.keyboard_path] = 2
@@ -658,14 +828,12 @@ class MonitorTests(DesktopTestCase):
         self.retry_timer.assert_called_once()
 
     def test_target_extension_state_change_forces_reconciliation(self) -> None:
-        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
-            "b", True
-        )
+        self.power_properties["OnBattery"] = True
         with (
             mock.patch.object(
                 POWER_TOGGLE,
                 "apply_current_power_state",
-                return_value=True,
+                return_value=POWER_TOGGLE.PolicyResult.COMPLETE,
             ) as apply,
             mock.patch.object(
                 POWER_TOGGLE,
@@ -704,6 +872,46 @@ class MonitorTests(DesktopTestCase):
             )
             apply.assert_called_once_with(self.power_proxy)
             self.assertEqual(needs_reconcile.call_count, 2)
+
+
+class CommandTests(DesktopTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        patch = mock.patch.object(POWER_TOGGLE.logging, "basicConfig")
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_once_reports_deferral_then_completes_on_open(self) -> None:
+        self.power_properties.update(OnBattery=True, LidIsClosed=True)
+        with mock.patch.object(
+            POWER_TOGGLE, "parse_arguments", return_value=mock.Mock(command="once")
+        ):
+            self.assertEqual(POWER_TOGGLE.main(), 1)
+            self.assertEqual(self.desktop, {"extension": False, "seconds": False})
+            POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+            self.assertTrue(self.state_file.exists())
+            self.power_properties["LidIsClosed"] = False
+            self.assertEqual(POWER_TOGGLE.main(), 0)
+            self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+
+    def test_restore_reports_deferral_and_keeps_baseline(self) -> None:
+        POWER_TOGGLE.save_state(POWER_TOGGLE.state_snapshot())
+        self.desktop = {"extension": False, "seconds": False}
+        self.keyboard_backlights[self.keyboard_path] = 0
+        self.gnome_keyboard_percentage = 0
+        self.power_properties["LidIsClosed"] = True
+        with mock.patch.object(
+            POWER_TOGGLE, "parse_arguments", return_value=mock.Mock(command="restore")
+        ):
+            self.assertEqual(POWER_TOGGLE.main(), 1)
+            self.assertEqual(self.desktop, {"extension": True, "seconds": True})
+            POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+            self.assertTrue(self.state_file.exists())
+            self.power_properties["LidIsClosed"] = False
+            self.assertEqual(POWER_TOGGLE.main(), 0)
+            self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+            self.assertEqual(self.gnome_keyboard_percentage, 100)
+            self.assertFalse(self.state_file.exists())
 
 
 class KeyboardBacklightMutationTests(unittest.TestCase):
