@@ -19,7 +19,7 @@ POWER_TOGGLE = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(POWER_TOGGLE)
 
 
-class PolicyStateTests(unittest.TestCase):
+class DesktopTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory(
             prefix=".test-state-", dir=ROOT
@@ -101,6 +101,8 @@ class PolicyStateTests(unittest.TestCase):
         self.gnome_keyboard_percentage = percentage
         return True
 
+
+class PolicyStateTests(DesktopTestCase):
     def test_battery_restart_preserves_baseline_then_restores(self) -> None:
         self.assertTrue(POWER_TOGGLE.apply_battery_policy())
         self.assertEqual(self.desktop, {"extension": False, "seconds": False})
@@ -523,30 +525,143 @@ class ExtensionRuntimeTests(unittest.TestCase):
                 )
 
 
-class MonitorTests(unittest.TestCase):
-    def test_target_extension_state_change_forces_reconciliation(self) -> None:
-        monitor_lock = mock.Mock()
-        power_proxy = mock.Mock()
-        extension_proxy = mock.Mock()
-        loop = mock.Mock()
-        with (
+class MonitorTests(DesktopTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.power_proxy = mock.Mock()
+        self.extension_proxy = mock.Mock()
+        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
+            "b", False
+        )
+        self.retry_timer = mock.Mock(return_value=42)
+        self.cancel_timer = mock.Mock()
+        patches = (
             mock.patch.object(
                 POWER_TOGGLE,
                 "acquire_monitor_lock",
-                return_value=monitor_lock,
             ),
             mock.patch.object(
                 POWER_TOGGLE,
                 "upower_proxy",
-                return_value=power_proxy,
+                return_value=self.power_proxy,
             ),
             mock.patch.object(
                 POWER_TOGGLE,
                 "gnome_shell_extensions_proxy",
-                return_value=extension_proxy,
+                return_value=self.extension_proxy,
             ),
-            mock.patch.object(POWER_TOGGLE.GLib, "MainLoop", return_value=loop),
-            mock.patch.object(POWER_TOGGLE, "on_battery", return_value=True),
+            mock.patch.object(POWER_TOGGLE.GLib, "MainLoop"),
+            mock.patch.object(POWER_TOGGLE.GLibUnix, "signal_add"),
+            mock.patch.object(
+                POWER_TOGGLE.GLib, "timeout_add_seconds", self.retry_timer
+            ),
+            mock.patch.object(POWER_TOGGLE.GLib, "source_remove", self.cancel_timer),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def emit(self, proxy: mock.Mock, signal_name: str, *args: object) -> None:
+        callbacks = [
+            call.args[1]
+            for call in proxy.connect.call_args_list
+            if call.args[0] == signal_name
+        ]
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0](proxy, *args)
+
+    def power_changed(self, using_battery: bool) -> None:
+        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
+            "b", using_battery
+        )
+        self.emit(
+            self.power_proxy,
+            "g-properties-changed",
+            POWER_TOGGLE.GLib.Variant(
+                "a{sv}", {"OnBattery": POWER_TOGGLE.GLib.Variant("b", using_battery)}
+            ),
+            [],
+        )
+
+    def assert_failed_transition_recovers(self, initial_battery: bool) -> None:
+        baseline = POWER_TOGGLE.state_snapshot()
+        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
+            "b", initial_battery
+        )
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        self.retry_timer.assert_not_called()
+
+        POWER_TOGGLE.set_keyboard_backlights.side_effect = lambda *_: False
+        with mock.patch.object(POWER_TOGGLE.LOG, "error"):
+            self.power_changed(not initial_battery)
+        self.assertEqual(
+            self.desktop, {"extension": initial_battery, "seconds": initial_battery}
+        )
+        self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+        self.retry_timer.assert_called_once_with(POWER_TOGGLE.RETRY_SECONDS, mock.ANY)
+
+        POWER_TOGGLE.set_keyboard_backlights.side_effect = self.set_keyboard_backlights
+        self.power_changed(initial_battery)
+        self.assertEqual(
+            self.desktop,
+            {"extension": not initial_battery, "seconds": not initial_battery},
+        )
+        self.assertEqual(
+            self.keyboard_backlights, {self.keyboard_path: 0 if initial_battery else 2}
+        )
+        self.assertEqual(self.gnome_keyboard_percentage, 0 if initial_battery else 100)
+        self.assertEqual(
+            POWER_TOGGLE.load_saved_state(), baseline if initial_battery else None
+        )
+        self.cancel_timer.assert_called_once_with(42)
+
+        POWER_TOGGLE.set_extension_enabled.reset_mock()
+        self.power_changed(initial_battery)
+        POWER_TOGGLE.set_extension_enabled.assert_not_called()
+        self.retry_timer.assert_called_once()
+
+    def test_ac_return_after_partial_battery_failure_restores_baseline(self) -> None:
+        self.assert_failed_transition_recovers(initial_battery=False)
+
+    def test_battery_return_after_partial_restore_reapplies_policy(self) -> None:
+        self.assert_failed_transition_recovers(initial_battery=True)
+
+    def test_failed_forced_reconcile_retries_unchanged_power_source(self) -> None:
+        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
+            "b", True
+        )
+        self.assertEqual(POWER_TOGGLE.monitor(), 0)
+        baseline = POWER_TOGGLE.load_saved_state()
+        self.keyboard_backlights[self.keyboard_path] = 2
+        self.gnome_keyboard_percentage = 100
+        POWER_TOGGLE.set_keyboard_backlights.side_effect = lambda *_: False
+        self.emit(self.extension_proxy, "notify::g-name-owner", None)
+        self.retry_timer.assert_called_once_with(POWER_TOGGLE.RETRY_SECONDS, mock.ANY)
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 2})
+
+        POWER_TOGGLE.set_keyboard_backlights.reset_mock()
+        POWER_TOGGLE.set_keyboard_backlights.side_effect = self.set_keyboard_backlights
+        retry = self.retry_timer.call_args.args[1]
+        self.assertEqual(retry(), POWER_TOGGLE.GLib.SOURCE_REMOVE)
+        POWER_TOGGLE.set_keyboard_backlights.assert_called_once_with(
+            {self.keyboard_path: 0}, 0
+        )
+        self.assertEqual(self.keyboard_backlights, {self.keyboard_path: 0})
+        self.assertEqual(self.gnome_keyboard_percentage, 0)
+        self.assertEqual(POWER_TOGGLE.load_saved_state(), baseline)
+        self.retry_timer.assert_called_once()
+        self.cancel_timer.assert_not_called()
+
+        POWER_TOGGLE.set_keyboard_backlights.reset_mock()
+        self.power_changed(True)
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.retry_timer.assert_called_once()
+
+    def test_target_extension_state_change_forces_reconciliation(self) -> None:
+        self.power_proxy.get_cached_property.return_value = POWER_TOGGLE.GLib.Variant(
+            "b", True
+        )
+        with (
             mock.patch.object(
                 POWER_TOGGLE,
                 "apply_current_power_state",
@@ -557,21 +672,14 @@ class MonitorTests(unittest.TestCase):
                 "extension_needs_battery_reconcile",
                 side_effect=(False, True),
             ) as needs_reconcile,
-            mock.patch.object(POWER_TOGGLE.GLibUnix, "signal_add"),
         ):
             self.assertEqual(POWER_TOGGLE.monitor(), 0)
-            signal_callbacks = [
-                call.args[1]
-                for call in extension_proxy.connect.call_args_list
-                if call.args[0] == "g-signal"
-            ]
-            self.assertEqual(len(signal_callbacks), 1)
-
             apply.reset_mock()
             parameters = mock.Mock()
             parameters.unpack.return_value = ("another-extension@example.com", {})
-            signal_callbacks[0](
-                extension_proxy,
+            self.emit(
+                self.extension_proxy,
+                "g-signal",
                 None,
                 "ExtensionStateChanged",
                 parameters,
@@ -579,20 +687,22 @@ class MonitorTests(unittest.TestCase):
             apply.assert_not_called()
 
             parameters.unpack.return_value = (POWER_TOGGLE.EXTENSION_UUID, {})
-            signal_callbacks[0](
-                extension_proxy,
+            self.emit(
+                self.extension_proxy,
+                "g-signal",
                 None,
                 "ExtensionStateChanged",
                 parameters,
             )
             apply.assert_not_called()
-            signal_callbacks[0](
-                extension_proxy,
+            self.emit(
+                self.extension_proxy,
+                "g-signal",
                 None,
                 "ExtensionStateChanged",
                 parameters,
             )
-            apply.assert_called_once_with(power_proxy)
+            apply.assert_called_once_with(self.power_proxy)
             self.assertEqual(needs_reconcile.call_count, 2)
 
 

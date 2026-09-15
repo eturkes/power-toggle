@@ -74,7 +74,8 @@
   lifecycle signals to avoid feedback.
 - Monitor = signal-driven steady state (`OnBattery`, managed extension events,
   bus-name ownership); retry timer only after failure. Bounded transition
-  polling belongs to extension settling.
+  polling belongs to extension settling. Failed policy → invalidate last-success
+  cache; retries + power-source reversals must reconcile partial mutations.
 
 ## Verification
 

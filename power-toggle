@@ -778,6 +778,8 @@ def monitor() -> int:
             last_power_state = current_power_state
             cancel_retry()
         else:
+            # Partial mutations invalidate the previous successful state.
+            last_power_state = None
             schedule_retry()
 
     def properties_changed(
