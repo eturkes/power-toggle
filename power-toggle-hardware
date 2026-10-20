@@ -1,0 +1,280 @@
+#!/usr/bin/python3
+"""Select Intel CPU and Xe GPU power policies from the power source."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import signal
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLibUnix", "2.0")
+from gi.repository import Gio, GLib, GLibUnix  # noqa: E402
+
+
+UPOWER = ("org.freedesktop.UPower", "/org/freedesktop/UPower")
+PPD = ("org.freedesktop.UPower.PowerProfiles", "/org/freedesktop/UPower/PowerProfiles")
+LOGIN = ("org.freedesktop.login1.Manager", "/org/freedesktop/login1")
+SYSFS = Path("/sys")
+RETRY_SECONDS = 30
+LOG = logging.getLogger("power-toggle-hardware")
+
+
+class Properties:
+    def __init__(self, interface: str, path: str, name: str | None = None):
+        self.interface = interface
+        self.proxy = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+            name or interface, path, interface, None,
+        )
+
+    def get(self, name: str):
+        if self.proxy.get_name_owner() is None:
+            raise RuntimeError(f"{self.interface} is unavailable")
+        reply = self.proxy.call_sync(
+            "org.freedesktop.DBus.Properties.Get",
+            GLib.Variant("(ss)", (self.interface, name)),
+            Gio.DBusCallFlags.NONE, 5000, None,
+        )
+        return reply.unpack()[0]
+
+    def set_profile(self, value: str) -> None:
+        self.proxy.call_sync(
+            "org.freedesktop.DBus.Properties.Set",
+            GLib.Variant("(ssv)", (
+                self.interface, "ActiveProfile", GLib.Variant("s", value),
+            )),
+            Gio.DBusCallFlags.NONE, 5000, None,
+        )
+
+
+def on_battery(upower: Properties) -> bool:
+    value = upower.get("OnBattery")
+    if not isinstance(value, bool):
+        raise RuntimeError("UPower did not return a valid power source")
+    return value
+
+
+def read(path: Path) -> str:
+    value = path.read_text().strip()
+    # Xe reports every profile, with the selected one enclosed in brackets.
+    return next((v[1:-1] for v in value.split() if v.startswith("[")), value)
+
+
+def write(path: Path, value: str) -> None:
+    if read(path) == value:
+        return
+    path.write_text(value + "\n")
+    if read(path) != value:
+        raise RuntimeError(f"{path} did not accept {value}")
+
+
+def cpu_policies(root: Path) -> list[Path]:
+    paths = sorted((root / "devices/system/cpu/cpufreq").glob("policy[0-9]*"))
+    if not paths:
+        raise RuntimeError("No CPU frequency policies were found")
+    return paths
+
+
+def gpu_policies(root: Path) -> list[Path]:
+    paths = sorted((root / "class/drm").glob(
+        "card[0-9]*/device/tile[0-9]*/gt[0-9]*/freq0/power_profile"
+    ))
+    if not paths:
+        raise RuntimeError("No Intel Xe GPU power profiles were found")
+    return paths
+
+
+def expected(battery: bool) -> tuple[str, str, str]:
+    return (
+        ("power-saver", "power", "power_saving") if battery
+        else ("performance", "performance", "base")
+    )
+
+
+def configure_hardware(battery: bool, root: Path = SYSFS) -> None:
+    pstate = root / "devices/system/cpu/intel_pstate"
+    if read(pstate / "status") != "active":
+        raise RuntimeError("Intel P-state must use active mode; run install-hardware.sh")
+    cpus, gpus = cpu_policies(root), gpu_policies(root)
+    if not battery:
+        # Restore supported ceilings, without raising firmware power/thermal limits.
+        write(pstate / "no_turbo", "0")
+        write(pstate / "max_perf_pct", "100")
+        for cpu in cpus:
+            write(cpu / "scaling_max_freq", read(cpu / "cpuinfo_max_freq"))
+        for gpu in gpus:
+            write(gpu.parent / "max_freq", read(gpu.parent / "rp0_freq"))
+    boost = pstate / "hwp_dynamic_boost"
+    if boost.exists():
+        write(boost, "0" if battery else "1")
+    for gpu in gpus:
+        write(gpu, expected(battery)[2])
+
+
+def status(upower: Properties, ppd: Properties, root: Path = SYSFS) -> dict:
+    battery = on_battery(upower)
+    profile, epp, gpu_profile = expected(battery)
+    pstate = root / "devices/system/cpu/intel_pstate"
+    report = {
+        "power_source": "battery" if battery else "AC",
+        "profile": ppd.get("ActiveProfile"),
+        "cpu_mode": read(pstate / "status"),
+        "platform_profile": read(root / "firmware/acpi/platform_profile"),
+        "turbo_allowed": read(pstate / "no_turbo") == "0",
+        "max_perf_pct": read(pstate / "max_perf_pct"),
+        "hwp_dynamic_boost": (
+            read(pstate / "hwp_dynamic_boost")
+            if (pstate / "hwp_dynamic_boost").exists() else None
+        ),
+        "cpus": [{
+            "policy": cpu.name,
+            "governor": read(cpu / "scaling_governor"),
+            "epp": read(cpu / "energy_performance_preference"),
+            "min_khz": int(read(cpu / "scaling_min_freq")),
+            "max_khz": int(read(cpu / "scaling_max_freq")),
+            "hardware_max_khz": int(read(cpu / "cpuinfo_max_freq")),
+        } for cpu in cpu_policies(root)],
+        "gpus": [{
+            "path": str(gpu),
+            "profile": read(gpu),
+            "min_mhz": int(read(gpu.parent / "min_freq")),
+            "max_mhz": int(read(gpu.parent / "max_freq")),
+            "hardware_max_mhz": int(read(gpu.parent / "rp0_freq")),
+        } for gpu in gpu_policies(root)],
+        "issues": [],
+    }
+    issues = report["issues"]
+    for key, wanted in (
+        ("profile", profile), ("cpu_mode", "active"),
+        ("platform_profile", "low-power" if battery else "performance"),
+    ):
+        if report[key] != wanted:
+            issues.append(f"{key}: expected {wanted}, got {report[key]}")
+    if report["hwp_dynamic_boost"] not in (None, "0" if battery else "1"):
+        issues.append("HWP dynamic boost does not match the power source")
+    for cpu in report["cpus"]:
+        if cpu["epp"] != epp or cpu["governor"] != "powersave":
+            issues.append(f"{cpu['policy']}: CPU energy preference is incorrect")
+        if not battery and cpu["max_khz"] != cpu["hardware_max_khz"]:
+            issues.append(f"{cpu['policy']}: AC frequency ceiling is restricted")
+    for gpu in report["gpus"]:
+        if gpu["profile"] != gpu_profile:
+            issues.append(f"{gpu['path']}: GPU power profile is incorrect")
+        if not battery and gpu["max_mhz"] != gpu["hardware_max_mhz"]:
+            issues.append(f"{gpu['path']}: AC frequency ceiling is restricted")
+    if not battery and (not report["turbo_allowed"] or report["max_perf_pct"] != "100"):
+        issues.append("AC CPU boost is restricted")
+    return report
+
+
+class Monitor:
+    def __init__(self, upower: Properties, ppd: Properties, root: Path = SYSFS):
+        self.upower, self.ppd, self.root = upower, ppd, root
+        self.idle_source = None
+        self.retry_source = None
+        self.last_source = None
+
+    def request(self, *_args) -> None:
+        if self.idle_source is None:
+            self.idle_source = GLib.idle_add(self.reconcile)
+
+    def retry(self) -> bool:
+        self.retry_source = None
+        self.request()
+        return GLib.SOURCE_REMOVE
+
+    def reconcile(self) -> bool:
+        self.idle_source = None
+        try:
+            battery = on_battery(self.upower)
+            target = expected(battery)[0]
+            if self.ppd.get("ActiveProfile") != target:
+                self.ppd.set_profile(target)
+            configure_hardware(battery, self.root)
+            report = status(self.upower, self.ppd, self.root)
+            # A power-source change during synchronous I/O needs a fresh pass.
+            if report["power_source"] != ("battery" if battery else "AC"):
+                self.request()
+                return GLib.SOURCE_REMOVE
+            if report["issues"]:
+                raise RuntimeError("; ".join(report["issues"]))
+        except (OSError, RuntimeError, GLib.Error) as error:
+            self.last_source = None
+            LOG.warning("Power policy is incomplete: %s", error)
+            if self.retry_source is None:
+                self.retry_source = GLib.timeout_add_seconds(RETRY_SECONDS, self.retry)
+        else:
+            if self.retry_source is not None:
+                GLib.source_remove(self.retry_source)
+                self.retry_source = None
+            if self.last_source != battery:
+                LOG.info("%s: CPU=%s; GPU=%s; HWP boost=%s",
+                         report["power_source"], expected(battery)[1],
+                         expected(battery)[2], report["hwp_dynamic_boost"])
+            self.last_source = battery
+        return GLib.SOURCE_REMOVE
+
+    def power_changed(self, _proxy, changed, invalidated) -> None:
+        if "OnBattery" in set(changed.keys()) | set(invalidated):
+            self.request()
+
+    def profile_changed(self, _proxy, changed, invalidated) -> None:
+        if "ActiveProfile" not in set(changed.keys()) | set(invalidated):
+            return
+        try:
+            target = expected(on_battery(self.upower))[0]
+            if self.ppd.get("ActiveProfile") == target:
+                return  # Ignore our own completed profile change.
+        except (RuntimeError, GLib.Error):
+            pass
+        self.request()
+
+    def resumed(self, _proxy, _sender, name, parameters) -> None:
+        if name == "PrepareForSleep" and parameters.unpack() == (False,):
+            self.request()
+
+    def run(self) -> int:
+        login = Properties(*LOGIN, name="org.freedesktop.login1")
+        self.upower.proxy.connect("g-properties-changed", self.power_changed)
+        self.ppd.proxy.connect("g-properties-changed", self.profile_changed)
+        for source in (self.upower, self.ppd, login):
+            source.proxy.connect("notify::g-name-owner", self.request)
+        login.proxy.connect("g-signal", self.resumed)
+        loop = GLib.MainLoop()
+
+        def stop():
+            loop.quit()
+            return GLib.SOURCE_REMOVE
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signum, stop)
+        self.request()
+        loop.run()
+        return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("monitor", "status"),
+                        help="Watch power events, or check the current hardware policy")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
+    try:
+        upower, ppd = Properties(*UPOWER), Properties(*PPD)
+        if args.command == "monitor":
+            return Monitor(upower, ppd).run()
+        report = status(upower, ppd)
+        print(json.dumps(report, indent=2))
+        return int(bool(report["issues"]))
+    except (OSError, RuntimeError, GLib.Error) as error:
+        LOG.error("%s", error)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

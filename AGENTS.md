@@ -85,3 +85,21 @@
   Tests mock desktop APIs + keep temporary state inside the repo.
 - Live read-only smoke = `./power-toggle status` with GNOME + UPower available.
   Inspect fields: exit zero can accompany `unknown`/`unavailable` diagnostics.
+
+## Hardware policy
+
+- `power-toggle-hardware` = root-owned system companion; retain the unprivileged
+  desktop watcher. Execute root code only from root-owned, non-user-writable
+  deployment paths under `/usr/local/libexec`.
+- Source owner = UPower `OnBattery`; AC → PPD `performance` + Xe `base` +
+  HWP dynamic boost; battery → PPD `power-saver` + Xe `power_saving`, no HWP
+  dynamic boost. PPD owns EPP/platform profile; Xe engines are discovered afresh.
+- AC = native CPU/GPU ceilings + turbo enabled; preserve firmware limits.
+  Battery = energy preferences, no arbitrary clock/power caps.
+- Events = source/profile changes, bus ownership, resume; coalesce notifications,
+  ignore successful self-generated profile changes, retry failures only.
+  Unknown power source → no policy mutation. Partial failure → no cached success.
+- Installer = Aeon `sdbootutil`, active Intel P-state now + next boot, system unit,
+  replacement of the GNOME automatic profile selector. Reinstallation is idempotent.
+- Gate = README Development + hardware `status` on physical AC and battery.
+  Status exits nonzero on mismatch; tests use project-local fake sysfs trees.

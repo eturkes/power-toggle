@@ -1,5 +1,84 @@
 # Power Toggle
 
+Power Toggle provides separate desktop and Intel hardware policies.
+The desktop watcher runs in the user session. The optional hardware watcher
+runs as a system service.
+
+## CPU and GPU policy
+
+The hardware watcher selects these policies:
+
+| Setting | AC | Battery |
+| --- | --- | --- |
+| Power profile | `performance` | `power-saver` |
+| Intel CPU EPP | `performance` | `power` |
+| Lenovo platform profile | `performance` | `low-power` |
+| HWP dynamic boost | Enabled | Disabled |
+| Intel Xe GPU profile, every engine | `base` | `power_saving` |
+
+Intel P-state uses active HWP mode. Power Profiles Daemon owns CPU EPP and
+the platform profile. Its `powersave` governor still permits full performance
+with EPP `performance`; it does not fix the CPU at its minimum frequency.
+See the [CPU driver documentation](https://docs.kernel.org/admin-guide/pm/intel_pstate.html)
+and the [Xe power-profile implementation](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/xe/xe_guc_pc.c).
+
+AC transitions restore CPU turbo, the full CPU performance range, and each
+CPU/GPU hardware frequency ceiling. Firmware thermal and power limits remain
+intact. Battery mode uses energy-saving scaling without fixed frequency caps
+or disabling turbo. GPU frequency floors retain their driver defaults.
+
+The hardware watcher handles power-source changes, daemon restarts, and resume.
+It does not poll after applying a policy. Failed operations retry after
+30 seconds. Manual power-profile changes are reconciled to the current power
+source while this service runs.
+
+### Install hardware switching
+
+This installer targets Aeon with `sdbootutil`, Intel HWP, Intel Xe graphics,
+UPower, Power Profiles Daemon, and system PyGObject.
+
+Run as the desktop user:
+
+```sh
+./install-hardware.sh
+```
+
+The installer uses `sudo` for system changes. It sets `intel_pstate=active`
+in `/etc/kernel/cmdline` and updates the current snapshot's boot entries.
+It also applies active mode immediately and restarts Power Profiles Daemon.
+No reboot is required.
+
+The installer disables `auto-power-profile@dmy3k.github.io`. The system service
+replaces that extension's profile selection and remains active outside the
+desktop session. The desktop watcher below remains separate.
+
+Check the live policy:
+
+```sh
+/usr/local/libexec/power-toggle-hardware status
+systemctl status power-toggle-hardware.service
+journalctl -u power-toggle-hardware.service
+```
+
+The status command checks every CPU policy and Xe engine.
+It exits nonzero if the hardware policy does not match the power source.
+
+To remove hardware switching:
+
+```sh
+./uninstall-hardware.sh
+```
+
+Removal selects Balanced, restores the GPU base profile, and disables HWP
+dynamic boost. Active Intel P-state mode remains enabled.
+If required, restore the desktop profile selector:
+
+```sh
+gnome-extensions enable auto-power-profile@dmy3k.github.io
+```
+
+## Desktop policy
+
 `power-toggle` watches UPower and changes desktop settings when the power source
 changes:
 
@@ -94,5 +173,14 @@ Run the development checks:
 
 ```sh
 /usr/bin/python3 -m unittest discover -s tests -v
-/usr/bin/bash -n install.sh uninstall.sh
+/usr/bin/bash -n install.sh uninstall.sh install-hardware.sh uninstall-hardware.sh
 ```
+
+After installation, verify the system unit:
+
+```sh
+systemd-analyze verify power-toggle-hardware.service
+```
+
+Connect AC and run the hardware status command. Disconnect AC and run it
+again. Both results must have an empty `issues` list.
