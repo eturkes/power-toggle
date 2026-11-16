@@ -181,6 +181,18 @@ class PolicyStateTests(DesktopTestCase):
 
         self.assertTrue(self.state_file.exists())
 
+    def test_excessively_nested_state_blocks_mutation_and_retains_baseline(self) -> None:
+        self.state_file.parent.mkdir(parents=True)
+        data = (ROOT / "tests/corpus/state/deep-json.json").read_bytes()
+        self.state_file.write_bytes(data)
+        for apply in (POWER_TOGGLE.apply_battery_policy, POWER_TOGGLE.restore_pre_battery_state):
+            with self.subTest(command=apply.__name__), self.assertLogs("power-toggle", level="ERROR"):
+                self.assertIs(apply(), POWER_TOGGLE.PolicyResult.FAILED)
+        POWER_TOGGLE.set_extension_enabled.assert_not_called()
+        POWER_TOGGLE.set_seconds_enabled.assert_not_called()
+        POWER_TOGGLE.set_keyboard_backlights.assert_not_called()
+        self.assertEqual(self.state_file.read_bytes(), data)
+
     def test_state_file_is_private_json(self) -> None:
         state = {
             "version": 3,
@@ -391,6 +403,16 @@ class PolicyStateTests(DesktopTestCase):
                     }
                 )
 
+    def test_embedded_nul_keyboard_path_is_rejected(self) -> None:
+        for path in ("/valid/path\0invalid", "/\0"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "keyboard backlight path"):
+                POWER_TOGGLE.validate_state({
+                    "version": 2,
+                    "extension_enabled": False,
+                    "clock_show_seconds": False,
+                    "keyboard_backlights": {path: 0},
+                })
+
     def test_invalid_keyboard_percentage_is_rejected(self) -> None:
         for percentage in (-1, 101, True, None):
             with (
@@ -599,7 +621,7 @@ class MonitorTests(DesktopTestCase):
                 return_value=self.extension_proxy,
             ),
             mock.patch.object(POWER_TOGGLE.GLib, "MainLoop"),
-            mock.patch.object(POWER_TOGGLE.GLibUnix, "signal_add"),
+            mock.patch.object(POWER_TOGGLE.GLib, "unix_signal_add"),
             mock.patch.object(
                 POWER_TOGGLE.GLib, "timeout_add_seconds", self.retry_timer
             ),

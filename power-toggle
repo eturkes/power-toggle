@@ -20,8 +20,7 @@ from typing import Any
 import gi
 
 gi.require_version("Gio", "2.0")
-gi.require_version("GLibUnix", "2.0")
-from gi.repository import Gio, GLib, GLibUnix  # noqa: E402
+from gi.repository import Gio, GLib  # noqa: E402
 
 
 EXTENSION_UUID = "system-monitor-next@paradoxxx.zero.gmail.com"
@@ -577,7 +576,12 @@ def validate_state(state: object) -> dict[str, Any]:
         if not isinstance(backlights, dict):
             raise ValueError("invalid keyboard backlight state")
         for path, brightness in backlights.items():
-            if not isinstance(path, str) or not GLib.Variant.is_object_path(path):
+            # The native validator stops at NUL; validate the whole JSON key.
+            if (
+                not isinstance(path, str)
+                or "\0" in path
+                or not GLib.Variant.is_object_path(path)
+            ):
                 raise ValueError("invalid keyboard backlight path")
             if (
                 isinstance(brightness, bool)
@@ -605,6 +609,8 @@ def load_saved_state() -> dict[str, Any] | None:
             return validate_state(json.load(state_file))
     except FileNotFoundError:
         return None
+    except RecursionError as error:
+        raise ValueError("saved state JSON is nested too deeply") from error
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -864,8 +870,8 @@ def monitor() -> int:
     proxy.connect("notify::g-name-owner", name_owner_changed)
     extension_proxy.connect("g-signal", extension_state_changed)
     extension_proxy.connect("notify::g-name-owner", extension_name_owner_changed)
-    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop_loop)
-    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop_loop)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop_loop)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop_loop)
 
     reconcile(force=True)
     LOG.info("Watching UPower and GNOME Shell state changes")

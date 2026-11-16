@@ -12,8 +12,7 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gio", "2.0")
-gi.require_version("GLibUnix", "2.0")
-from gi.repository import Gio, GLib, GLibUnix  # noqa: E402
+from gi.repository import Gio, GLib  # noqa: E402
 
 
 UPOWER = ("org.freedesktop.UPower", "/org/freedesktop/UPower")
@@ -252,7 +251,7 @@ class Monitor:
             return GLib.SOURCE_REMOVE
 
         for signum in (signal.SIGINT, signal.SIGTERM):
-            GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signum, stop)
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signum, stop)
         self.request()
         loop.run()
         return 0
