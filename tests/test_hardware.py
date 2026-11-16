@@ -18,7 +18,7 @@ HARDWARE = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(HARDWARE)
 
 
-class HardwareTests(unittest.TestCase):
+class HardwareTestCase(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix=".test-state-", dir=ROOT)
         self.addCleanup(temporary.cleanup)
@@ -78,6 +78,8 @@ class HardwareTests(unittest.TestCase):
     def report(self):
         return HARDWARE.status(self.upower, self.ppd, self.root)
 
+
+class HardwareTests(HardwareTestCase):
     def test_ac_battery_ac_updates_all_engines_and_cpu_preferences(self):
         for battery in (False, True, False):
             with self.subTest(battery=battery):

@@ -5,3 +5,6 @@ __pycache__/
 .ruff_cache/
 .test-state-*/
 .verify.*/
+.venv/
+.venv-host/
+.hypothesis/

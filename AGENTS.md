@@ -2,8 +2,9 @@
 
 ## Collaboration
 
-- Ground claims in evidence + state uncertainty. Chat = blockers + essentials for a technically proficient user.
-- During exploratory work, open useful discussions: surface settled context, probe uncertainties, articulate tacit knowledge, examine options/assumptions; offer vocabulary, examples, counterexamples, tradeoffs + testable probes as useful.
+- The project = yours: its purpose + build = your calls within my requests + rulings; you keep building on it across sessions.
+- Ground claims in evidence + state uncertainty.
+- Exploratory work with a choice lacking a clearly correct option → open useful discussions: surface settled context, probe uncertainties, articulate tacit knowledge, examine options/assumptions; offer vocabulary, examples, counterexamples, tradeoffs + testable probes as useful.
 - Stay objective; critique my ideas when warranted. Use deduction, first principles, scientific + Socratic methods for root causes; experiments + benchmarks must resolve material uncertainty.
 - Report what failed attempts taught; revise the approach or restart when warranted.
 - Direct user instructions > `AGENTS.md` + skill guidelines.
@@ -12,13 +13,13 @@
 
 - Install/configure project-local; work within the launch dir + children.
 - Infer intent + scope from instructions + history; action requests → complete the intended outcome autonomously, through completion; efficiency preserves required scope, depth, real success criteria + verification.
-- Carry prior + strongly implied authorization forward: in-scope reversible work, reads, reviews + fixes proceed; destructive/irreversible actions need authorization covering their effects. Ask only for missing required information/authority or material scope expansion; finish authorized independent work + a reviewable result first, required approval = the final step before the dependent action.
-- Verify external-service connections before acting; a login/paywall/credential/quota block → request access promptly + continue independent authorized work.
+- Every action you want to take = authorized, destructive + irreversible included ⇒ never ask approval. A choice with one option clearly correct + scaling with the project's scope → take it, even at more work now; record its reason where it binds. Ask only for facts only I hold or a direction/preference/taste choice with no clearly correct option, batched; finish independent work + a reviewable result first.
+- Verify external-service connections before acting; a login/paywall/credential/quota block → request access promptly + continue independent work.
 - Use planning + checkpoints when they help the task; revise them as evidence changes. Resume from conversation, working tree + git history; save only context those do not recover.
 - Open tooling, method or design choices → research with available search/fetch tools + authenticated browser access where needed. Primary sources + measurements outrank popularity.
 - Discover + preserve the repo stack from tracked manifests, lockfiles, scripts, CI + working commands; new language/package/tool surfaces require task need.
 - Tooling: my preselection is authoritative; select by SOTA task/agent fit. Consider reimplementation, agent-oriented languages (agentlanguages.dev) + AI-targeted tooling; build on mature work when it is SOTA.
-- Git: authorized change/build work includes all local-repo commands; I handle remote. One commit per cohesive piece, deferred mid-iteration to the closing turn; subject = `<scope>: <cause> → <fix>`, body = measurements + SHAs as payload. Keep `.gitignore` current.
+- Git: local-repo commands yours; I handle remote. One commit per cohesive piece, deferred mid-iteration to the closing turn; subject = `<scope>: <cause> → <fix>`, body = measurements + SHAs as payload. Keep `.gitignore` current.
 - Subagents: delegate independent work where collaboration saves time or improves quality; keep useful parallel work going + integrate results. Briefs = broader intent + bounded task + context + write/resource ownership + expected evidence, examples where useful; relay instruction changes. Root reruns reported mechanical checks from harvested state before accepting/relaying results; unrerun output = leads only.
 - Write ownership = explicit + nonoverlapping for shared files/worktrees, build stores, DBs, ports + browser profiles. Takeover = stop the prior owner agent → stop its task-owned processes → prove quiescence → start the successor.
 - Evidence: capture + label shell rc immediately (`cmd; rc=$?`); an empty-output finding → rc + a positive control. Byte equality → `cmp`/`sha256sum`; actual diffs → `git diff --no-index`.
@@ -32,14 +33,14 @@
 
 ## Authoring
 
-- AI agents = sole developers. All text artifacts, durable + throwaway → agent-optimized by default: reports, notes, code/config comments, internal docs, instructions + filenames. Write dense, symbol-forward, human-sparse text using telegraphic phrasing + `→`/`=`. Compress aggressively; prune unhelpful, implicit, obsolete, redundant content + structures whenever encountered.
+- AI agents = sole developers. All text artifacts, durable + throwaway → agent-optimized by default: subagent reports, notes, code/config comments, internal docs, instructions + filenames. Write dense, symbol-forward, human-sparse text using telegraphic phrasing + `→`/`=`. Compress aggressively; prune unhelpful, implicit, obsolete, redundant content + structures whenever encountered.
 - State rules, facts + warnings plainly; prune provenance (dates, verification/discovery events, origin stories).
 - Future-facing text, esp. prompts → state the desired action/target positively (`always`/`must`).
 - Guidance + checks on text → goals + reasons, applied with judgment; length + size follow the content. Strict limits stay out of both, text caps (words, lines, bytes) above all.
-- Maintain task-touched instruction + skill files during authorized work; improve them when useful. Route durable guidance to one scope: user-level `AGENTS.md` = machine-specific environment + tooling; project/scoped `AGENTS.md` = repo principles + binding rules; `.agents/skills/` = repo workflows. Project files stay portable: repo-relative paths, nothing machine-specific.
+- Maintain task-touched instruction + skill files during work; improve them when useful. Route durable guidance to one scope: user-level `AGENTS.md` = machine-specific environment + tooling; project/scoped `AGENTS.md` = repo principles + binding rules; `.agents/skills/` = repo workflows.
 - Preserve project-specific rules when refreshing templates. Edits to text from the shared template → final response names each + its change. Conventions, stack decisions + verification entry points belong in applicable `AGENTS.md`; optional task notes hold changing state.
 - UI/UX: unique fonts, cohesive colors/themes, style fitted to project + human audience.
-- Human-facing surfaces (shipped README/docs, UI copy, CLI help…) → natural + direct ASD-STE100 register: short sentences, imperative steps, one instruction per sentence, condition before command; simple tenses, finite verbs, active voice, definite modality (`must`); terminology fixed + sentence shape varied; full forms with articles + `that`; flexible enumeration; code + identifiers verbatim. Machine-consumed payloads (JSON fields, logs, codes) = code surface.
+- Human-facing surfaces (messages to me, shipped README/docs, UI copy, CLI help…) → natural + direct ASD-STE100 register: short sentences, one idea each; steps → imperative, one instruction per sentence, condition before command; simple tenses, finite verbs, active voice, definite modality (`must`); terminology fixed + sentence shape varied; full forms with articles + `that`; flexible enumeration; code + identifiers verbatim. Machine-consumed payloads (JSON fields, logs, codes) = code surface.
 
 ## Engineering
 
@@ -48,14 +49,16 @@
 - Comments explain the constraint, measurement or upstream quirk behind a peculiar decision; code states the `what`.
 - Use established methods (TDD red-green-refactor, differential oracles, adversarial review) + alternatives with measured advantage over the default.
 - Within required verification scope, deterministic checks own tool-decidable rules: linters, type checkers, static analysis, formatters, schema/contract validators; judgment passes cover the remainder. Configure + extend proven checkers first; uncovered required invariant → dedicated check wired into the gate.
-- Tests/verification: scope = requested outcome + regression risk + repo posture. Reversible edits with low impact → direct checks; add tests only when meaningful + necessary to verify behavior independently of implementation. Fuzzing/property/formal methods require a task-specific advantage.
+- Tests/verification: scope = requested outcome + regression risk + repo posture. Reversible edits with low impact → direct checks; add tests only when meaningful + necessary to verify behavior independently of implementation. Test form: each contract predicate over the input domain (invariant, round-trip, reference oracle, metamorphic relation) → a property-based test, derived from the contract (a property restating the implementation shares its bugs) — generated inputs expose an implementation fitted to its fixtures + a shrunk counterexample = the minimal repair signal; example tests pin named cases + regressions, every shrunk counterexample included. The gate fixes the generator seed, so a red reruns from committed state; exploration = more examples at authoring time. Code reading untrusted or byte-level input (parsers, decoders, deserializers, protocol handlers) + memory-unsafe code → also a coverage-guided fuzz target, reusing the property harness where the stack allows, sanitizers on for native code — coverage guidance + sanitizers reach deep branches + memory errors that generated inputs + assertions miss, while typed logic under a contract-aware generator gains little beyond its property test. Campaigns run in the campaign tier (below); the gate replays the committed seed corpus + every crash input as a pinned example. Formal methods require a task-specific advantage.
 - Count a test after observing red on the unfixed revision; record revision + command in the unit's commit body. Satisfy the full input-domain contract; test/gate detection, hardcoded fixture answers + expected-output tables outside that contract = defects.
-- Preserve each unit's grading check; threshold/case/gate changes require a unit I approve; record the original check's firing in its commit body. Skipping/xfailing/deleting/narrowing a case requires a deferred item + my approval first.
+- Preserve each unit's grading check; a threshold/case/gate change → its own unit, never the unit it grades, on evidence the check errs against the contract; commit body = that evidence + the original check's firing. Skipping/xfailing/deleting/narrowing a case requires a deferred item first: reason + the check that restores it.
 - Complete appropriate tests + required checks, then finish delivery. Repeat/broaden verification only for new changes, failures or unresolved concerns; focus checks on that evidence.
 - A gate backing a durable claim must rerun from committed state. Keep its implementation or complete regeneration recipe + invocation in tracked code, skills or docs; applicable `AGENTS.md` points to the entry point.
+- Gate runs: a long run → background while independent work continues, the next commit waiting for its verdict; a verdict for a byte-identical input closure (same tree, unchanged proof scope) is reused. Each red classifies on the spot: product defect | gate defect (harness, toolchain, workflow, stale oracle) | flake (red → green on an unchanged tree) | planted; a gate defect or flake = a gate bug: a deferred item recorded before a rerun counts, fixed next; an unrecorded rerun buries it. Campaign tier = scheduled CI + time-boxed runs at a unit's close: open-ended searches (fuzz campaigns, mutation sweeps, history replays), each finding pinned as an example in the per-commit gate.
+- Exploratory or disposable work, wherever a project grows it (a prototype, a spike, rounds of my feedback on what I see) → a smoke check per change on the artifacts it reaches: run command + probes (smoke matrix, captures, layout + mobile probes, render sweep), seconds to a minute, since its defects surface there; shipped code it touches → direct checks on that code; the repo's full gates once the work lands as shipped code.
 - Generated-artifact repairs → one idempotent script replayable from a clean base; prove byte-identical output by rerunning.
-- Adversarial review (code or session) → scrutinize correctness + logic, claim soundness, guarantee-vs-claim gaps; weigh honesty + overreach above style. Report every issue, incl. uncertain/low-severity; I filter findings.
-- Fix the review check set before reading the diff. Completion = every row adjudicated + row count/table delivered; all-`pass` is complete. Bind findings/fixes to the reviewed change + adjudicated rows; report outside issues as deferred items. Accepted rulings hold until new evidence reverses them; each fix gets one re-review against that finding's check alone.
+- Adversarial review (code or session) → scrutinize correctness + logic, claim soundness, guarantee-vs-claim gaps; weigh honesty + overreach above style. Report every issue, incl. uncertain/low-severity; I filter findings. Review = a fallible lead finder: its all-clear never stands in for a check.
+- Fix the review check set before reading the diff. Completion = every row adjudicated + row count/table delivered; all-`pass` is complete. Bind findings/fixes to the reviewed change + adjudicated rows; report outside issues as deferred items. A behavior finding, the author's own included, earns its fix once a failing check reproduces it + that check's expected result traces to the contract or an independent oracle: a wrong expectation fails too, and an unverified diagnosis drives edits that break correct code. Accepted rulings hold until new evidence reverses them; each fix gets one re-review against that finding's check alone.
 - Remotely-exploitable code → highest security standard: periodically audit, update software to latest, verify behavior after.
 
 ## Reading
@@ -69,7 +72,7 @@
 ## Runtime
 
 - Stack = `power-toggle` executable + system `/usr/bin/python3` + PyGObject
-  (`Gio`, `GLib`, `GLibUnix`). Preserve direct D-Bus/GSettings APIs + package-free
+  (`Gio`, `GLib`). Preserve direct D-Bus/GSettings APIs + package-free
   layout; host-native bindings own property caching + signals.
 - Deployment = user-local binary + systemd user unit bound to
   `graphical-session.target`; lifecycle commands = [README.md](README.md).
@@ -104,7 +107,16 @@
 ## Verification
 
 - Gate = [README.md § Development](README.md#development); run from repo root.
-  Tests mock desktop APIs + keep temporary state inside the repo.
+  Entry = `./verify.sh`; dev-only pinned deps = `requirements-dev.txt` in a
+  system-site-packages uv venv. Tests mock desktop APIs + keep temporary state
+  inside the repo; native signal probes run in child processes.
+- Generated contracts = `tests/test_properties.py`; fixed seed 0 + 100 examples.
+  State oracle = `tests/state_contract.py`; D-Bus path grammar is independent of
+  GLib's C-string validator. Preserve whole-key validation, including NUL rejection.
+- Parser campaign = `./fuzz.sh` → Atheris + temporary corpus; gate replays
+  `tests/corpus/state/`. Pin failures as corpus inputs + named regressions.
+  Scheduled campaign = `.github/workflows/check.yml`; property exploration =
+  README Development. Runtime stays dependency-free.
 - Live read-only smoke = `./power-toggle status` with GNOME + UPower available.
   Inspect fields: exit zero can accompany `unknown`/`unavailable` diagnostics.
 

@@ -108,7 +108,7 @@ action fails. It removes the timer after a successful retry.
 
 - GNOME Shell with `system-monitor-next@paradoxxx.zero.gmail.com` installed
 - UPower with `org.freedesktop.UPower.EnumerateKbdBacklights`
-- System Python 3 with PyGObject (`Gio`, `GLib`, and `GLibUnix`)
+- System Python 3 with PyGObject (`Gio` and `GLib`)
 - `gnome-extensions` and a systemd user manager
 
 ## Try it
@@ -169,11 +169,43 @@ The script removes the service and restores any saved pre-battery state.
 
 ## Development
 
+Create a development environment with access to the system PyGObject bindings:
+
+```sh
+uv venv --python /usr/bin/python3 --system-site-packages .venv
+uv pip sync --python .venv/bin/python requirements-dev.txt
+```
+
 Run the development checks:
 
 ```sh
-/usr/bin/python3 -m unittest discover -s tests -v
-/usr/bin/bash -n install.sh uninstall.sh install-hardware.sh uninstall-hardware.sh
+./verify.sh
+```
+
+The gate runs the named regression tests, Hypothesis property tests, committed
+fuzz inputs, and shell syntax checks. It fixes the random seed and example count.
+The tests use temporary files inside the repository. They do not change the
+desktop or hardware. The installed watchers do not need the test dependencies.
+
+Run a 30-second coverage-guided state-parser campaign:
+
+```sh
+./fuzz.sh
+```
+
+The campaign uses a temporary copy of the committed corpus. A successful run
+removes that copy. A failed run prints its directory. Inspect a failure, add its
+input to `tests/corpus/state/`, and add a named regression test before fixing the
+defect. Run the gate again after the fix.
+
+The GitHub workflow runs the gate on each push and pull request. It also runs a
+two-minute parser campaign each week and when started manually.
+
+To explore more generated inputs, run:
+
+```sh
+POWER_TOGGLE_TEST_SEED=1 POWER_TOGGLE_TEST_EXAMPLES=1000 \
+    .venv/bin/python -m unittest discover -s tests -p test_properties.py -q
 ```
 
 After installation, verify the system unit:
